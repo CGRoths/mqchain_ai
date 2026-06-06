@@ -14,8 +14,18 @@ from pdfminer.high_level import extract_text
 
 from app.core.config import settings
 from app.ingestion.column_mapping import ColumnMapping, ColumnMappingService
+from app.ingestion.deployment_extractor import (
+    deployment_tables_from_structured_tables,
+    json_deployment_tables,
+    markdown_tables,
+    table_metadata,
+    yaml_deployment_tables,
+)
+from app.ingestion.github_source_resolver import resolve_github_source
+from app.ingestion.html_table_extractor import extract_html_deployment_tables
 from app.ingestion.intake_models import CandidatePreview, ParsedSource, SourceArtifact, SourceFingerprint
 from app.ingestion.network_normalizer import NetworkNormalizer
+from app.ingestion.solidity_address_extractor import extract_solidity_deployment_table
 
 
 ADDRESS_RE = re.compile(
@@ -321,6 +331,32 @@ class JsonYamlAdapter(SourceAdapter):
 
     def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
         text = _decode(raw_content, fallback=artifact.pasted_text or "")
+        tables = json_deployment_tables(
+            text,
+            source_url=artifact.source_url,
+            source_input_type="json_deployment_registry",
+            evidence_type="official_docs_deployment" if artifact.source_url else "source_extraction_context",
+        )
+        if not tables:
+            tables = yaml_deployment_tables(
+                text,
+                source_url=artifact.source_url,
+                source_input_type="yaml_deployment_registry",
+                evidence_type="official_docs_deployment" if artifact.source_url else "source_extraction_context",
+            )
+        if tables:
+            source_input_type = (tables[0].get("metadata") or {}).get("source_input_type") or "structured_deployment_registry"
+            candidates = _extract_table_candidates(artifact, fingerprint, tables, default_source_input_type=source_input_type)
+            metadata = table_metadata(tables, source_input_type=source_input_type, text=text, source_url=artifact.source_url)
+            return _parsed(
+                artifact,
+                fingerprint,
+                document_text=text,
+                document_title=_title_from_url(artifact.source_url),
+                metadata=metadata,
+                table_preview=tables,
+                candidates=candidates,
+            )
         candidates = _extract_text_candidates(artifact, fingerprint, text, source_input_type="structured_text_registry")
         metadata = {"source_input_type": "structured_text_registry"}
         return _parsed(artifact, fingerprint, document_text=text, document_title=None, metadata=metadata, table_preview=[], candidates=candidates)
@@ -330,12 +366,58 @@ class GitHubAdapter(SourceAdapter):
     adapter_name = "github_adapter"
 
     def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
-        text = _decode(raw_content, fallback=artifact.pasted_text or "")
+        text, resolved_url = resolve_github_source(artifact.source_url, raw_content)
+        if not text:
+            text = artifact.pasted_text or ""
         if not text and artifact.source_url:
             text = f"GitHub source: {artifact.source_url}"
+
+        tables = _github_deployment_tables(text, source_url=resolved_url or artifact.source_url)
+        if tables:
+            source_input_type = (tables[0].get("metadata") or {}).get("source_input_type") or "official_github_deployment_table"
+            candidates = _extract_table_candidates(artifact, fingerprint, tables, default_source_input_type=source_input_type)
+            metadata = table_metadata(tables, source_input_type=source_input_type, text=text, source_url=resolved_url or artifact.source_url)
+            metadata["resolved_source_url"] = resolved_url
+            return _parsed(
+                artifact,
+                fingerprint,
+                document_text=text,
+                document_title=_title_from_url(resolved_url or artifact.source_url),
+                metadata=metadata,
+                table_preview=tables,
+                candidates=candidates,
+            )
+
         candidates = _extract_text_candidates(artifact, fingerprint, text, source_input_type="github_source")
-        metadata = {"source_input_type": fingerprint.final_source_type or "github_source"}
-        return _parsed(artifact, fingerprint, document_text=text, document_title=_title_from_url(artifact.source_url), metadata=metadata, table_preview=[], candidates=candidates)
+        metadata = {"source_input_type": fingerprint.final_source_type or "github_source", "resolved_source_url": resolved_url}
+        return _parsed(artifact, fingerprint, document_text=text, document_title=_title_from_url(resolved_url or artifact.source_url), metadata=metadata, table_preview=[], candidates=candidates)
+
+
+class WebDocsAdapter(SourceAdapter):
+    adapter_name = "web_docs_adapter"
+
+    def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
+        text = _decode(raw_content, fallback=artifact.pasted_text or "")
+        tables = _web_docs_deployment_tables(text, source_url=artifact.source_url, content_type=artifact.content_type)
+        warnings: list[str] = []
+        if tables:
+            source_input_type = (tables[0].get("metadata") or {}).get("source_input_type") or "docs_deployment_table"
+            candidates = _extract_table_candidates(artifact, fingerprint, tables, default_source_input_type=source_input_type)
+            metadata = table_metadata(tables, source_input_type=source_input_type, text=text, source_url=artifact.source_url)
+        else:
+            candidates = []
+            warnings.append("docs_table_not_detected")
+            metadata = {"source_input_type": "docs_text", "table_count": 0, "warnings": warnings}
+        return _parsed(
+            artifact,
+            fingerprint,
+            document_text=text,
+            document_title=_title_from_url(artifact.source_url),
+            metadata=metadata,
+            table_preview=tables,
+            candidates=candidates,
+            warnings=warnings,
+        )
 
 
 class PdfAdapter(SourceAdapter):
@@ -444,6 +526,7 @@ ADAPTERS = {
     "plain_text_adapter": PlainTextAdapter,
     "json_yaml_adapter": JsonYamlAdapter,
     "github_adapter": GitHubAdapter,
+    "web_docs_adapter": WebDocsAdapter,
     "pdf_adapter": PdfAdapter,
     "excel_csv_adapter": ExcelCsvAdapter,
 }
@@ -454,6 +537,115 @@ def adapter_by_name(adapter_name: str) -> SourceAdapter:
         return ADAPTERS[adapter_name]()
     except KeyError as exc:
         raise ValueError(f"Unknown adapter: {adapter_name}") from exc
+
+
+def _github_deployment_tables(text: str, *, source_url: str | None) -> list[dict]:
+    path = urlparse(source_url or "").path.lower()
+    if path.endswith(".sol") or _looks_like_solidity(text):
+        tables = extract_solidity_deployment_table(text, source_url=source_url)
+        if tables:
+            return tables
+    if path.endswith((".json", ".jsonc")) or text.lstrip().startswith(("{", "[")):
+        tables = json_deployment_tables(
+            text,
+            source_url=source_url,
+            source_input_type="github_json_deployment_registry",
+            evidence_type="official_github_deployment",
+        )
+        if tables:
+            return tables
+    if path.endswith((".yaml", ".yml")):
+        tables = yaml_deployment_tables(
+            text,
+            source_url=source_url,
+            source_input_type="github_json_deployment_registry",
+            evidence_type="official_github_deployment",
+        )
+        if tables:
+            return tables
+    if _looks_like_html(text):
+        tables = extract_html_deployment_tables(text, source_url=source_url)
+        if tables:
+            return _retag_tables(tables, source_input_type="github_markdown_deployment_table", evidence_type="official_github_deployment")
+    if "|" in text:
+        tables = deployment_tables_from_structured_tables(
+            markdown_tables(text),
+            source_url=source_url,
+            source_input_type="github_markdown_deployment_table",
+            evidence_type="official_github_deployment",
+            text=text,
+        )
+        if tables:
+            return tables
+    return []
+
+
+def _web_docs_deployment_tables(text: str, *, source_url: str | None, content_type: str | None) -> list[dict]:
+    if _looks_like_html(text) or "html" in (content_type or "").lower():
+        tables = extract_html_deployment_tables(text, source_url=source_url)
+        if tables:
+            return tables
+    if "|" in text:
+        tables = deployment_tables_from_structured_tables(
+            markdown_tables(text),
+            source_url=source_url,
+            source_input_type="docs_markdown_deployment_table",
+            evidence_type="official_docs_deployment",
+            text=text,
+        )
+        if tables:
+            return tables
+    for block in _fenced_code_blocks(text):
+        if _looks_like_solidity(block):
+            tables = extract_solidity_deployment_table(block, source_url=source_url)
+            if tables:
+                return _retag_tables(tables, source_input_type="docs_markdown_deployment_table", evidence_type="official_docs_deployment")
+        tables = json_deployment_tables(
+            block,
+            source_url=source_url,
+            source_input_type="docs_markdown_deployment_table",
+            evidence_type="official_docs_deployment",
+        )
+        if not tables:
+            tables = yaml_deployment_tables(
+                block,
+                source_url=source_url,
+                source_input_type="docs_markdown_deployment_table",
+                evidence_type="official_docs_deployment",
+            )
+        if tables:
+            return tables
+    return []
+
+
+def _retag_tables(tables: list[dict], *, source_input_type: str, evidence_type: str) -> list[dict]:
+    retagged = []
+    for table in tables:
+        metadata = dict(table.get("metadata") or {})
+        metadata["source_input_type"] = source_input_type
+        metadata["evidence_type"] = evidence_type
+        rows = []
+        for row in table.get("rows", []):
+            row = dict(row)
+            row["Evidence Type"] = evidence_type
+            rows.append(row)
+        retagged.append({**table, "metadata": metadata, "rows": rows})
+    return retagged
+
+
+def _looks_like_html(text: str) -> bool:
+    sample = text[:2048].lower()
+    return "<table" in sample or "<html" in sample or "<!doctype html" in sample
+
+
+def _looks_like_solidity(text: str) -> bool:
+    sample = text[:8192]
+    return "pragma solidity" in sample or bool(re.search(r"\b(?:address|I[A-Za-z0-9_]+)\s+(?:public\s+|internal\s+|private\s+|external\s+)?constant\s+[A-Z0-9_]+\s*=", sample))
+
+
+def _fenced_code_blocks(text: str) -> Iterable[str]:
+    for match in re.finditer(r"```[A-Za-z0-9_-]*\s*\n(.*?)```", text, flags=re.DOTALL):
+        yield match.group(1)
 
 
 async def fetch_url_bytes(source_url: str) -> tuple[bytes, str | None, str | None]:
@@ -1332,6 +1524,9 @@ def _extract_table_candidates(
 ) -> list[CandidatePreview]:
     candidates: list[CandidatePreview] = []
     for table in tables:
+        table_meta = table.get("metadata") or {}
+        table_source_input_type = table_meta.get("source_input_type") or default_source_input_type
+        table_evidence_type = table_meta.get("evidence_type")
         mapping = ColumnMappingService.map_headers([str(header) for header in table.get("headers", [])])
         for row in table.get("rows", []):
             if not isinstance(row, dict) or not any(str(value).strip() for value in row.values()):
@@ -1345,7 +1540,7 @@ def _extract_table_candidates(
                 table=table,
                 mapping=mapping,
                 source_file_name=source_file_name,
-                default_source_input_type=default_source_input_type,
+                default_source_input_type=table_source_input_type,
             )
             for address_kind, address, role in _structured_address_fields(mapping, row, role_hint, table):
                 candidate = _candidate_from_address(
@@ -1360,8 +1555,8 @@ def _extract_table_candidates(
                     source_row=row_number,
                     source_page=_int_or_none(mapping.get(row, "source_row")) if "page" in (mapping.columns.get("source_row") or "").lower() else None,
                     table_name=table.get("name"),
-                    evidence_type=mapping.get(row, "evidence_type") or "source_extraction_context",
-                    source_input_type=default_source_input_type,
+                    evidence_type=mapping.get(row, "evidence_type") or table_evidence_type or "source_extraction_context",
+                    source_input_type=table_source_input_type,
                     raw_reference={**base_reference, "address_column_kind": address_kind},
                 )
                 if candidate:
@@ -1381,8 +1576,8 @@ def _extract_table_candidates(
                     source_row=row_number,
                     source_page=None,
                     table_name=table.get("name"),
-                    evidence_type=mapping.get(row, "evidence_type") or "source_extraction_context",
-                    source_input_type=default_source_input_type,
+                    evidence_type=mapping.get(row, "evidence_type") or table_evidence_type or "source_extraction_context",
+                    source_input_type=table_source_input_type,
                     raw_reference={**base_reference, "address_column_kind": "row_regex"},
                 )
                 if candidate:
@@ -1461,6 +1656,14 @@ def _candidate_from_address(
         normalized = clean.lower() if clean.startswith("0x") else clean
     confidence = _confidence_from_value(raw_reference.get("confidence")) or (70 if raw_network else 45)
     entity = raw_reference.get("row_entity") or _entity_from_sheet_name(source_sheet)
+    if not raw_network and source_input_type in {
+        "docs_html_deployment_table",
+        "docs_markdown_deployment_table",
+        "github_solidity_address_book",
+        "github_json_deployment_registry",
+        "github_markdown_deployment_table",
+    }:
+        warnings.append("missing_network_context")
     return CandidatePreview(
         address=clean,
         normalized_address=normalized,
@@ -1512,6 +1715,8 @@ def _structured_address_fields(mapping: ColumnMapping, row: dict, role_hint: str
 
 def _row_reference(*, row: dict, table: dict, mapping: ColumnMapping, source_file_name: str | None, default_source_input_type: str) -> dict:
     validator_public_key = mapping.get(row, "validator_public_key")
+    deployment_details = _deployment_raw_details(row)
+    raw_row = deployment_details.get("raw_row") if isinstance(deployment_details.get("raw_row"), dict) else None
     return {
         "raw_row_json": {key: value for key, value in row.items() if not str(key).startswith("_")},
         "source_input_type": default_source_input_type,
@@ -1522,6 +1727,12 @@ def _row_reference(*, row: dict, table: dict, mapping: ColumnMapping, source_fil
         "row_protocol": mapping.get(row, "protocol"),
         "row_category": mapping.get(row, "category"),
         "evidence_type": mapping.get(row, "evidence_type"),
+        "contract_name": deployment_details.get("contract_name") or _first_present_cell(row, "Contract Name", "contract_name", "Contract", "Name"),
+        "role_source": deployment_details.get("role_source") or _first_present_cell(row, "Role", "role"),
+        "column_name": deployment_details.get("column_name"),
+        "line_number": deployment_details.get("line_number") or mapping.get(row, "source_row"),
+        "raw_row": raw_row,
+        "raw_line": raw_row.get("raw_line") if raw_row else None,
         "report_date": mapping.get(row, "report_date"),
         "audit_date": mapping.get(row, "audit_date"),
         "confidence": mapping.get(row, "confidence"),
@@ -1529,6 +1740,26 @@ def _row_reference(*, row: dict, table: dict, mapping: ColumnMapping, source_fil
         "validator_public_key": validator_public_key,
         "warnings": ["validator_public_key_metadata_only"] if validator_public_key else [],
     }
+
+
+def _deployment_raw_details(row: dict) -> dict:
+    raw = _first_present_cell(row, "Raw Row JSON", "raw_row_json")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _first_present_cell(row: dict, *keys: str) -> str | None:
+    normalized = {re.sub(r"[^a-z0-9]+", "_", str(key).strip().lower()).strip("_"): key for key in row}
+    for key in keys:
+        actual = normalized.get(re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_"))
+        if actual is not None and row.get(actual) not in {None, ""}:
+            return str(row.get(actual)).strip()
+    return None
 
 
 def clean_wallet_address(value: str | None) -> str | None:
@@ -1600,6 +1831,26 @@ def _suggest_role(role_hint: str | None) -> str | None:
         return "cex_hot_wallet"
     if "reserve" in text or "por" in text or "audited" in text:
         return "cex_por_wallet"
+    if "factory" in text:
+        return "factory_contract"
+    if "router" in text:
+        return "router_contract"
+    if "pool_addresses_provider" in text or "addresses_provider" in text or "address provider" in text:
+        return "address_provider"
+    if "oracle" in text:
+        return "oracle"
+    if "configurator" in text:
+        return "protocol_configurator"
+    if "collector" in text or "treasury" in text:
+        return "treasury"
+    if "nftdescriptor" in text or "nft descriptor" in text or "descriptor" in text:
+        return "nft_descriptor"
+    if "flow" in text or "stream" in text or "lockup" in text:
+        return "protocol_contract"
+    if "token" in text:
+        return "token_contract"
+    if "pool" in text:
+        return "liquidity_pool"
     normalized = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
     return normalized or None
 

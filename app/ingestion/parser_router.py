@@ -19,6 +19,8 @@ class ParserRouter:
         "github_blob": "github_adapter",
         "github_raw": "github_adapter",
         "github_directory": "github_adapter",
+        "official_docs": "web_docs_adapter",
+        "official_website": "web_docs_adapter",
         "json": "json_yaml_adapter",
         "yaml": "json_yaml_adapter",
         "deployment_json": "json_yaml_adapter",

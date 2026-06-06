@@ -14,8 +14,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db.database import Base, SessionLocal, engine, init_db
+from app.ingestion.github_source_resolver import github_blob_to_raw_url
 from app.ingestion.intake_orchestrator import IntakeOrchestrator
 from app.ingestion.source_adapters import _layout_wallet_rows_from_page
+from app.ingestion.solidity_address_extractor import extract_solidity_deployment_table
 from app.models.intake import AddressCandidate, AddressEvidence, SourceJob
 from app.services.registry_service import RegistryPromotionService
 from app.main import app
@@ -64,6 +66,24 @@ def _upload_preview(client: TestClient, filename: str, content: bytes, requested
         files={"file": (filename, content, "application/octet-stream")},
         data=data,
     )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _url_preview(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    source_url: str,
+    content: str,
+    content_type: str = "text/html",
+    input_method: str = "url",
+) -> dict:
+    async def fake_fetch(url: str):
+        return content.encode("utf-8"), url, content_type
+
+    monkeypatch.setattr("app.ingestion.intake_orchestrator.fetch_url_bytes", fake_fetch)
+    response = client.post("/api/intake/preview", json={"input_method": input_method, "source_url": source_url})
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -219,6 +239,128 @@ def test_csv_requested_as_por_pdf_routes_to_excel_adapter(client: TestClient) ->
     )
     assert preview["final_source_type"] == "csv_upload"
     assert preview["adapter_name"] == "excel_csv_adapter"
+
+
+def test_uniswap_docs_deployment_table_preview_save_run_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    html = """
+    <html><body>
+      <h1>Uniswap v2 deployments</h1>
+      <table>
+        <tr><th>Network</th><th>Factory Contract Address</th><th>V2Router02 Contract Address</th></tr>
+        <tr><td>Mainnet</td><td>0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f</td><td>0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D</td></tr>
+        <tr><td>Arbitrum</td><td>0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9</td><td>0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24</td></tr>
+      </table>
+    </body></html>
+    """
+    preview = _url_preview(
+        client,
+        monkeypatch,
+        source_url="https://developers.uniswap.org/docs/protocols/v2/deployments",
+        content=html,
+    )
+    assert preview["final_source_type"] == "official_docs"
+    assert preview["adapter_name"] == "web_docs_adapter"
+    assert preview["profile"]["entity_name"] == "Uniswap"
+    assert preview["profile"]["category"] == "dex"
+    assert preview["profile"]["metadata"]["source_input_type"] == "docs_html_deployment_table"
+    candidates = preview["candidates_preview"]
+    assert len(candidates) == 4
+    assert {candidate["suggested_role"] for candidate in candidates} == {"factory_contract", "router_contract"}
+    assert {candidate["source_network"] for candidate in candidates} == {"Ethereum", "Arbitrum"}
+    assert all(candidate["evidence_type"] == "official_docs_deployment" for candidate in candidates)
+    assert all(candidate["status"] == "needs_review" for candidate in candidates)
+
+    job = client.post("/api/intake/jobs", json={"preview_id": preview["preview_id"]}).json()
+    run = client.post(f"/api/intake/jobs/{job['id']}/run")
+    assert run.status_code == 200, run.text
+    assert run.json()["extracted_candidates"] == 4
+    saved_candidates = client.get(f"/api/intake/jobs/{job['id']}/candidates").json()
+    evidence = client.get(f"/api/intake/jobs/{job['id']}/evidence").json()
+    assert len(saved_candidates) == 4
+    assert len(evidence) == 4
+    assert evidence[0]["payload"]["raw_reference"]["column_name"] in {"Factory Contract Address", "V2Router02 Contract Address"}
+
+
+def test_sablier_sectioned_docs_table_uses_heading_as_network(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    html = """
+    <html><body>
+      <h2>Ethereum</h2>
+      <table>
+        <tr><th>Contract</th><th>Address</th><th>Deployment</th></tr>
+        <tr><td>SablierFlow</td><td>0x8441111111111111111111111111111111111111</td><td>v1</td></tr>
+        <tr><td>FlowNFTDescriptor</td><td>0x24b2222222222222222222222222222222222222</td><td>v1</td></tr>
+      </table>
+      <h2>Abstract</h2>
+      <table>
+        <tr><th>Contract</th><th>Address</th><th>Deployment</th></tr>
+        <tr><td>SablierFlow</td><td>0x2fac333333333333333333333333333333333333</td><td>v1</td></tr>
+      </table>
+    </body></html>
+    """
+    preview = _url_preview(
+        client,
+        monkeypatch,
+        source_url="https://docs.sablier.com/guides/flow/deployments",
+        content=html,
+    )
+    candidates = preview["candidates_preview"]
+    assert len(candidates) == 3
+    assert preview["profile"]["entity_name"] == "Sablier"
+    assert preview["profile"]["category"] == "streaming_payments"
+    assert [candidate["source_network"] for candidate in candidates] == ["Ethereum", "Ethereum", "Abstract"]
+    assert {candidate["suggested_role"] for candidate in candidates} == {"protocol_contract", "nft_descriptor"}
+
+
+def test_aave_github_solidity_constants_preview_save_run_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = """
+    pragma solidity ^0.8.0;
+    // Main Aave V3 pool addresses provider
+    IPoolAddressesProvider internal constant POOL_ADDRESSES_PROVIDER =
+      IPoolAddressesProvider(0x1111111111111111111111111111111111111111);
+    address internal constant AAVE_ORACLE = 0x2222222222222222222222222222222222222222;
+    """
+    preview = _url_preview(
+        client,
+        monkeypatch,
+        source_url="https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3Ethereum.sol",
+        content=source,
+        content_type="text/plain",
+        input_method="github",
+    )
+    assert preview["final_source_type"] == "github_blob"
+    assert preview["adapter_name"] == "github_adapter"
+    assert preview["profile"]["entity_name"] == "Aave"
+    assert preview["profile"]["category"] == "lending"
+    candidates = preview["candidates_preview"]
+    assert len(candidates) == 2
+    assert {candidate["suggested_role"] for candidate in candidates} == {"address_provider", "oracle"}
+    assert {candidate["source_network"] for candidate in candidates} == {"Ethereum"}
+    assert all(candidate["source_input_type"] == "github_solidity_address_book" for candidate in candidates)
+    assert all(candidate["evidence_type"] == "official_github_deployment" for candidate in candidates)
+    assert all(candidate["source_url"] == "https://raw.githubusercontent.com/aave-dao/aave-address-book/main/src/AaveV3Ethereum.sol" for candidate in candidates)
+
+    job = client.post("/api/intake/jobs", json={"preview_id": preview["preview_id"]}).json()
+    run = client.post(f"/api/intake/jobs/{job['id']}/run")
+    assert run.status_code == 200, run.text
+    assert run.json()["extracted_candidates"] == 2
+    assert len(client.get(f"/api/intake/jobs/{job['id']}/candidates").json()) == 2
+    evidence = client.get(f"/api/intake/jobs/{job['id']}/evidence").json()
+    assert len(evidence) == 2
+    assert {item["payload"]["raw_reference"]["contract_name"] for item in evidence} == {"POOL_ADDRESSES_PROVIDER", "AAVE_ORACLE"}
+
+
+def test_generic_solidity_router_role_inference() -> None:
+    tables = extract_solidity_deployment_table(
+        "address public constant ROUTER = 0x3333333333333333333333333333333333333333;",
+        source_url="https://github.com/example/protocol/blob/main/src/Deployments.sol",
+    )
+    assert tables[0]["rows"][0]["Role"] == "router_contract"
+
+
+def test_github_blob_url_converts_to_raw_source() -> None:
+    assert github_blob_to_raw_url("https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3Ethereum.sol") == (
+        "https://raw.githubusercontent.com/aave-dao/aave-address-book/main/src/AaveV3Ethereum.sol"
+    )
 
 
 def test_pdf_requested_as_excel_upload_routes_to_pdf_adapter(client: TestClient) -> None:
