@@ -149,6 +149,11 @@ INTAKE_CONSOLE_HTML = """
     .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
     .metric { border: 1px solid var(--line); border-radius: 6px; padding: 8px; min-height: 54px; }
     .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .candidate-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; table-layout: fixed; }
+    .candidate-table th, .candidate-table td { border: 1px solid var(--line); padding: 7px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    .candidate-table th { background: #edf3f2; color: #30424a; font-size: 12px; }
+    .candidate-table td { background: #fff; }
+    .candidate-table .address { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
     pre { min-height: 360px; max-height: 70vh; overflow: auto; margin: 0; padding: 12px; border-radius: 8px; background: #101820; color: #e8eef3; white-space: pre-wrap; }
     [hidden] { display: none !important; }
     @media (max-width: 860px) { main { grid-template-columns: 1fr; } .tabs, .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -194,6 +199,22 @@ INTAKE_CONSOLE_HTML = """
         <div class="metric"><span>Confidence</span><strong id="fingerprint_confidence">-</strong></div>
         <div class="metric"><span>Override</span><strong id="override_reason">-</strong></div>
       </div>
+      <div id="candidateTableWrap" hidden>
+        <table class="candidate-table" aria-label="Candidate preview table">
+          <thead>
+            <tr>
+              <th>Entity</th>
+              <th>Network</th>
+              <th>Chain</th>
+              <th>Address</th>
+              <th>Role</th>
+              <th>Confidence</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="candidateRows"></tbody>
+        </table>
+      </div>
       <pre id="output">{}</pre>
     </section>
   </main>
@@ -202,7 +223,27 @@ INTAKE_CONSOLE_HTML = """
     const output = document.getElementById("output");
     const val = id => document.getElementById(id).value.trim();
     const setVal = (id, value) => { document.getElementById(id).value = value || ""; };
+    const candidatesFrom = data => Array.isArray(data) ? data : (Array.isArray(data.candidates_preview) ? data.candidates_preview : []);
+    const cell = value => String(value ?? "-").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    const renderCandidateTable = data => {
+      const rows = candidatesFrom(data);
+      const wrap = document.getElementById("candidateTableWrap");
+      const body = document.getElementById("candidateRows");
+      wrap.hidden = rows.length === 0;
+      body.innerHTML = rows.map(item => `
+        <tr>
+          <td>${cell(item.entity_name)}</td>
+          <td>${cell(item.source_network)}</td>
+          <td>${cell(item.chain_slug || item.chain_guess || item.chain_id)}</td>
+          <td class="address">${cell(item.address)}</td>
+          <td>${cell(item.suggested_role)}</td>
+          <td>${cell(item.confidence_initial)}</td>
+          <td>${cell(item.status)}</td>
+        </tr>
+      `).join("");
+    };
     const show = data => {
+      renderCandidateTable(data);
       output.textContent = JSON.stringify(data, null, 2);
       document.getElementById("final_source_type").textContent = data.final_source_type || "-";
       document.getElementById("adapter_name").textContent = data.adapter_name || "-";

@@ -420,6 +420,62 @@ def test_pdf_compact_hacken_parser_does_not_parse_footer(client: TestClient) -> 
     assert "pdf_audited_wallet_section_found_but_no_rows" in preview["warnings"]
 
 
+def test_pdf_compact_hacken_parser_ignores_page_noise_until_collateral_ratios(client: TestClient) -> None:
+    sample = (
+        "Proof of Reserves Audit Report BYBIT"
+        "Audited walletsNetworkAddress"
+        "Aptos0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e35d9a1e8"
+        "Hacken's BYBIT Proof of Reserve 2026/04/22 Confidential Page8"
+        "Hacken OU Parda 4, Kesklinn Tallinn 10151 Harju Maakond Eesti Kesklinna, Estonia"
+        "Arbitrum0xf440139a62b2b939699c5b3e09f88e40464ab9bc"
+        "Bitcoin12rFmDggwCNrRL6vuPEjzCDSskTRPjDajP"
+        "BSC0x1c3944173abee256456b1498299fc501ad5bbd6f"
+        "Collateral ratios"
+        "Ethereum0x9999999999999999999999999999999999999999"
+    )
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    rows = preview["table_preview"][0]["rows"]
+    networks = [row["Network"] for row in rows]
+    assert networks == ["Aptos", "Arbitrum", "Bitcoin", "BSC"]
+    assert preview["profile"]["metadata"]["parser_stop_marker"] == "Collateral ratios"
+    assert preview["profile"]["metadata"]["raw_wallet_rows_detected"] == 4
+    assert preview["profile"]["metadata"]["total_wallet_rows_detected"] == 4
+    assert preview["profile"]["metadata"]["network_counts"] == {"Aptos": 1, "Arbitrum": 1, "Bitcoin": 1, "BSC": 1}
+    assert preview["profile"]["metadata"]["candidate_rows_created"] == 4
+    assert "Ethereum" not in networks
+    assert {candidate["source_network"] for candidate in preview["candidates_preview"]} == {"Aptos", "Arbitrum", "Bitcoin", "BSC"}
+
+
+def test_pdf_compact_hacken_real_bybit_excerpt_continues_after_page_footers(client: TestClient) -> None:
+    sample = (
+        "Proof of Reserves Audit Report BYBIT"
+        "Audited walletsNetworkAddress"
+        "Aptos0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e35d9a1e8"
+        "Hacken's BYBIT Proof of Reserve 2026/04/22 Parda 4 Page8"
+        "Arbitrum0xf440139a62b2b939699c5b3e09f88e40464ab9bc"
+        "ArbitrumNova0xd4d1111111111111111111111111111111111111"
+        "Hacken OU Parda 4, Kesklinn Tallinn 10151 Harju Maakond Eesti Kesklinna, Estonia Page9"
+        "Avalanche-C0x2222222222222222222222222222222222222222"
+        "Bitcoin12rFmDggwCNrRL6vuPEjzCDSskTRPjDajP"
+        "BSC0x1c3944173abee256456b1498299fc501ad5bbd6f"
+        "Hacken's BYBIT Proof of Reserve 2026/04/22 Page10"
+        "Ethereum0x3333333333333333333333333333333333333333"
+        "Hacken's BYBIT Proof of Reserve 2026/04/22 Page11"
+        "TronTQY8hQGQ2Z1P2rJjZfY5rS7qk9hF5pQy7x"
+        "Collateral ratios"
+    )
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    metadata = preview["profile"]["metadata"]
+    candidate_networks = {candidate["source_network"] for candidate in preview["candidates_preview"]}
+    assert metadata["pdf_parser_mode"] == "hacken_audited_wallet_compact_table"
+    assert metadata["audited_wallet_rows_detected"] >= 8
+    assert metadata["network_counts"]["Bitcoin"] == 1
+    assert metadata["network_counts"]["BSC"] == 1
+    assert "Bitcoin" in candidate_networks
+    assert "BSC" in candidate_networks
+    assert metadata["parser_stop_marker"] == "Collateral ratios"
+
+
 def test_candidate_save_rolls_back_without_context_or_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     preview = _upload_preview(
         client,
@@ -519,6 +575,8 @@ def test_intake_console_and_input_window_behavior(client: TestClient) -> None:
     html = client.get("/intake-console").text
     assert "MQCHAIN Intake Console" in html
     assert 'accept=".pdf,.csv,.xlsx,.xls,.txt,.md,.json,.yaml,.yml"' in html
+    assert "Candidate preview table" in html
+    assert "candidateTableWrap" in html
     assert "required source_type" not in html.lower()
 
     response = client.get("/input-window", follow_redirects=False)
