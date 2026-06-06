@@ -393,6 +393,7 @@ class IntakeOrchestrator:
             warnings=_dedupe(warnings),
             confidence=max(0, min(100, fingerprint.confidence + (10 if candidates else 0) - len(fatal_errors) * 25)),
             recommended_action="fix_fatal_errors" if fatal_errors else "run_extraction",
+            metadata=metadata,
         )
 
     def _store_candidates(self, job: SourceJob, source_document: SourceDocument, candidates: list[CandidatePreview]) -> int:

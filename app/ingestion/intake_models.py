@@ -63,6 +63,7 @@ class IntakeProfile:
     warnings: list[str] = field(default_factory=list)
     confidence: int = 0
     recommended_action: str = "run_extraction"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

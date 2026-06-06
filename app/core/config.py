@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     source_fetch_max_bytes: int = 10_000_000
     preview_candidate_limit: int = 100
     max_extraction_candidates_per_job: int = 10_000
+    pdf_max_pages: int | None = 50
 
     model_config = SettingsConfigDict(env_prefix="MQCHAIN_AI_", env_file=".env", extra="ignore")
 

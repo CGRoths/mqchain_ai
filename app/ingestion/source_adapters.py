@@ -29,6 +29,7 @@ LONG_0X_RE = re.compile(r"^0x[a-fA-F0-9]{40,64}$")
 BTC_RE = re.compile(r"^(?:bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$", re.IGNORECASE)
 TRON_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 TON_RE = re.compile(r"^(?:EQ|UQ)[A-Za-z0-9_-]{46}$")
+SUBSTRATE_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,64}$")
 HACKEN_STOP_MARKERS = {"collateral ratios", "team composition", "conclusion", "disclaimers"}
 HACKEN_NETWORKS = sorted(
     {
@@ -170,14 +171,19 @@ class PdfAdapter(SourceAdapter):
         text = ""
         if raw_content:
             try:
-                text = extract_text(BytesIO(raw_content), maxpages=10)
+                if settings.pdf_max_pages and settings.pdf_max_pages > 0:
+                    text = extract_text(BytesIO(raw_content), maxpages=settings.pdf_max_pages)
+                else:
+                    text = extract_text(BytesIO(raw_content))
             except Exception:
                 text = raw_content[:16_000].decode("utf-8", errors="ignore")
                 warnings.append("pdf_text_extraction_fallback")
         entity_name = _detect_pdf_entity(text)
         table_preview = _parse_hacken_audited_wallet_rows(text)
+        diagnostics = _pdf_audited_wallet_diagnostics(text, table_preview)
         if table_preview:
             candidates = _extract_table_candidates(artifact, fingerprint, table_preview, default_source_input_type="pdf_audited_wallet_table")
+            diagnostics["pdf_parser_mode"] = "hacken_audited_wallet_table"
             metadata = {
                 "source_input_type": "pdf_audited_wallet_table",
                 "entity_name": entity_name,
@@ -185,11 +191,28 @@ class PdfAdapter(SourceAdapter):
                 "sub_category": "reserve_boundary",
                 "expected_roles": ["cex_por_wallet"],
                 "warnings": warnings,
+                **diagnostics,
             }
         else:
+            if diagnostics["audited_wallet_heading_found"]:
+                warnings.append("pdf_audited_wallet_section_found_but_no_rows")
             warnings.append("pdf_loose_text_fallback_used")
             candidates = _extract_text_candidates(artifact, fingerprint, text, source_input_type="pdf_text_fallback")
-            metadata = {"source_input_type": "pdf_text_fallback", "entity_name": entity_name, "warnings": warnings}
+            diagnostics["pdf_parser_mode"] = "pdf_text_fallback"
+            metadata = {
+                "source_input_type": "pdf_text_fallback",
+                "entity_name": entity_name,
+                "warnings": warnings,
+                **diagnostics,
+            }
+            if entity_name == "Bybit" and _is_proof_of_reserves_text(text):
+                metadata.update(
+                    {
+                        "category": "cex",
+                        "sub_category": "reserve_boundary",
+                        "expected_roles": ["cex_por_wallet"],
+                    }
+                )
         return _parsed(artifact, fingerprint, document_text=text, document_title=_first_line(text), metadata=metadata, table_preview=table_preview, candidates=candidates, warnings=warnings)
 
 
@@ -367,7 +390,8 @@ def _markdown_tables(text: str) -> list[dict]:
 
 def _parse_hacken_audited_wallet_rows(text: str) -> list[dict]:
     lines = [(line_number, line.strip()) for line_number, line in enumerate(text.splitlines(), start=1)]
-    start_index = _audited_wallet_section_start(lines)
+    section = _audited_wallet_section_state(lines)
+    start_index = section["start_index"]
     if start_index is None:
         return []
 
@@ -381,19 +405,22 @@ def _parse_hacken_audited_wallet_rows(text: str) -> list[dict]:
         if not line or _is_footer_only_line(line):
             index += 1
             continue
-        network_match = _match_known_network_prefix(line)
+        network_match = _match_known_network_at(lines, index)
         if network_match is None:
             index += 1
             continue
 
-        network, remainder = network_match
+        network, remainder, next_index = network_match
         pieces: list[str] = [remainder] if remainder else []
-        index += 1
+        index = next_index
         while index < len(lines):
-            _next_number, next_line = lines[index]
-            if _is_hacken_stop_line(next_line) or _match_known_network_prefix(next_line) is not None:
+            next_line = lines[index][1] if index < len(lines) else None
+            if _address_from_network_pieces(network, pieces) and not _should_continue_wrapped_address(network, pieces, next_line):
                 break
-            if not next_line or _is_footer_only_line(next_line):
+            _next_number, next_line = lines[index]
+            if _is_hacken_stop_line(next_line) or _is_footer_only_line(next_line) or _match_known_network_at(lines, index) is not None:
+                break
+            if not next_line:
                 index += 1
                 continue
             if _looks_like_address_continuation(next_line):
@@ -428,16 +455,59 @@ def _parse_hacken_audited_wallet_rows(text: str) -> list[dict]:
     ] if rows else []
 
 
+def _pdf_audited_wallet_diagnostics(text: str, tables: list[dict]) -> dict:
+    lines = [(line_number, line.strip()) for line_number, line in enumerate(text.splitlines(), start=1)]
+    section = _audited_wallet_section_state(lines)
+    heading_index = section["heading_index"]
+    excerpt: list[str] = []
+    if heading_index is not None:
+        start = max(0, heading_index - 5)
+        end = min(len(lines), heading_index + 15)
+        excerpt = [line for _line_number, line in lines[start:end]]
+    rows_detected = sum(len(table.get("rows", [])) for table in tables)
+    start_index = section["start_index"]
+    return {
+        "pdf_text_line_count": len(lines),
+        "audited_wallet_heading_found": bool(section["heading_found"]),
+        "network_address_header_found": bool(section["header_found"]),
+        "audited_wallet_start_line": lines[start_index][0] if isinstance(start_index, int) and start_index < len(lines) else None,
+        "audited_wallet_rows_detected": rows_detected,
+        "pdf_parser_mode": "hacken_audited_wallet_table" if rows_detected else "pdf_text_fallback",
+        "pdf_text_excerpt_around_audited_wallet": excerpt[:20],
+    }
+
+
 def _audited_wallet_section_start(lines: list[tuple[int, str]]) -> int | None:
+    return _audited_wallet_section_state(lines)["start_index"]
+
+
+def _audited_wallet_section_state(lines: list[tuple[int, str]]) -> dict:
     for index, (_line_number, line) in enumerate(lines):
-        if "audited wallets" not in line.lower():
+        if not _is_audited_wallet_heading(line):
             continue
+        network_line: int | None = None
+        address_line: int | None = None
         for header_index in range(index + 1, min(index + 10, len(lines))):
             header = re.sub(r"\s+", " ", lines[header_index][1].lower()).strip()
-            if "network" in header and "address" in header:
-                return header_index + 1
-        return index + 1
-    return None
+            if "network" in header and network_line is None:
+                network_line = header_index
+            if "address" in header and address_line is None:
+                address_line = header_index
+            if network_line is not None and address_line is not None:
+                return {
+                    "heading_found": True,
+                    "header_found": True,
+                    "heading_index": index,
+                    "start_index": max(network_line, address_line) + 1,
+                }
+        return {"heading_found": True, "header_found": False, "heading_index": index, "start_index": index + 1}
+    return {"heading_found": False, "header_found": False, "heading_index": None, "start_index": None}
+
+
+def _is_audited_wallet_heading(line: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", line.lower()).strip()
+    compact = re.sub(r"[^a-z0-9]+", "", line.lower())
+    return "audited wallets" in normalized or "auditedwallets" in compact
 
 
 def _is_hacken_stop_line(line: str) -> bool:
@@ -453,7 +523,32 @@ def _is_footer_only_line(line: str) -> bool:
         return True
     if re.fullmatch(r"page\s+\d+(?:\s+of\s+\d+)?", normalized, flags=re.IGNORECASE):
         return True
+    lower = normalized.lower()
+    if "bybit proof of reserve" in lower or "bybit proof of reserves" in lower:
+        return True
+    if "hacken" in lower and "proof of reserve" in lower:
+        return True
     return normalized.lower() in {"hacken", "proof of reserves audit report", "bybit proof of reserves audit report"}
+
+
+def _match_known_network_at(lines: list[tuple[int, str]], index: int) -> tuple[str, str, int] | None:
+    line = lines[index][1]
+    direct = _match_known_network_prefix(line)
+    if direct is not None:
+        network, remainder = direct
+        if not remainder and index + 1 < len(lines):
+            combined_line = f"{line} {lines[index + 1][1]}".strip()
+            combined = _match_known_network_prefix(combined_line)
+            if combined is not None and len(combined[0].split()) > len(network.split()):
+                return combined[0], combined[1], index + 2
+        return network, remainder, index + 1
+
+    if index + 1 < len(lines):
+        combined_line = f"{line} {lines[index + 1][1]}".strip()
+        combined = _match_known_network_prefix(combined_line)
+        if combined is not None and len(combined[0].split()) > 1:
+            return combined[0], combined[1], index + 2
+    return None
 
 
 def _match_known_network_prefix(line: str) -> tuple[str, str] | None:
@@ -480,13 +575,18 @@ def _address_from_network_pieces(network: str, pieces: list[str]) -> str | None:
     if not compact:
         return None
     normalized_network = NetworkNormalizer.normalize(network)
+    if normalized_network.chain_guess == "substrate":
+        match = SUBSTRATE_RE.search(compact)
+        if match:
+            address = match.group(0)
+            return address if _valid_address_for_network(address, normalized_network) else None
     if normalized_network.chain_guess in {"aptos", "sui"}:
         match = re.search(r"0x[a-fA-F0-9]{40,64}", compact)
         if match:
             address = match.group(0)
             return address if _valid_address_for_network(address, normalized_network) else None
     if normalized_network.chain_guess == "evm":
-        match = re.search(r"0x[a-fA-F0-9]{40}", compact)
+        match = re.search(r"0x[a-fA-F0-9]{40}(?![a-fA-F0-9])", compact)
         if match:
             address = match.group(0)
             return address if _valid_address_for_network(address, normalized_network) else None
@@ -499,6 +599,24 @@ def _address_from_network_pieces(network: str, pieces: list[str]) -> str | None:
     if match and _valid_address_for_network(match.group(0), normalized_network):
         return match.group(0)
     return None
+
+
+def _should_continue_wrapped_address(network: str, pieces: list[str], next_line: str | None) -> bool:
+    if not next_line:
+        return False
+    if _is_hacken_stop_line(next_line) or _is_footer_only_line(next_line) or _match_known_network_prefix(next_line):
+        return False
+    normalized_network = NetworkNormalizer.normalize(network)
+    if normalized_network.chain_guess not in {"aptos", "sui"}:
+        return False
+    compact = "".join(re.sub(r"\s+", "", piece.strip()) for piece in pieces if piece and piece.strip())
+    match = re.search(r"0x[a-fA-F0-9]{40,63}$", compact)
+    if not match:
+        return False
+    continuation = re.sub(r"\s+", "", next_line.strip())
+    if not re.fullmatch(r"[a-fA-F0-9]{1,24}", continuation):
+        return False
+    return len(match.group(0)) - 2 + len(continuation) <= 64
 
 
 def _extract_table_candidates(
@@ -730,6 +848,8 @@ def _valid_address_for_network(address: str, network) -> bool:
         return chain_guess == "tron"
     if TON_RE.fullmatch(address):
         return chain_guess == "ton"
+    if SUBSTRATE_RE.fullmatch(address):
+        return chain_guess == "substrate"
     return False
 
 
@@ -917,6 +1037,11 @@ def _detect_pdf_entity(text: str) -> str | None:
     if re.search(r"\bBYBIT\b", text):
         return "Bybit"
     return None
+
+
+def _is_proof_of_reserves_text(text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    return "proof of reserves" in normalized or "proof of reserve" in normalized
 
 
 def _first_line(text: str) -> str | None:

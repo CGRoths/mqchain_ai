@@ -275,6 +275,99 @@ def test_pdf_preview_bybit_profile_uses_audited_wallet_metadata(client: TestClie
     assert all("Preliminary" not in candidate["address"] for candidate in preview["candidates_preview"])
 
 
+def test_pdf_network_and_address_headers_on_separate_lines_parse(client: TestClient) -> None:
+    sample = """
+    BYBIT Proof of Reserves Audit Report
+    Audited wallets
+    Network
+    Address
+    Arbitrum 0x18673311fec54ac2244a602e6d91845553d24e62
+    Conclusion
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert preview["profile"]["metadata"]["network_address_header_found"] is True
+    assert preview["profile"]["metadata"]["audited_wallet_rows_detected"] == 1
+    assert preview["profile"]["metadata"]["pdf_parser_mode"] == "hacken_audited_wallet_table"
+    assert preview["candidates_preview"][0]["address"] == "0x18673311fec54ac2244a602e6d91845553d24e62"
+
+
+def test_pdf_network_and_address_on_separate_lines_parse(client: TestClient) -> None:
+    sample = """
+    BYBIT Proof of Reserves
+    Audited wallets
+    Network Address
+    Aptos
+    0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e3
+    5d9a1e8
+    Conclusion
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert len(preview["candidates_preview"]) == 1
+    assert preview["candidates_preview"][0]["source_network"] == "Aptos"
+    assert preview["candidates_preview"][0]["address"] == "0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e35d9a1e8"
+
+
+def test_pdf_split_multiword_network_parses_arbitrum_nova(client: TestClient) -> None:
+    sample = """
+    BYBIT Proof of Reserves
+    Audited wallets
+    Network Address
+    Arbitrum
+    Nova
+    0xd4d1111111111111111111111111111111111111
+    Conclusion
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert len(preview["candidates_preview"]) == 1
+    assert preview["candidates_preview"][0]["source_network"] == "Arbitrum Nova"
+    assert preview["candidates_preview"][0]["chain_id"] == 42170
+    assert preview["candidates_preview"][0]["address"] == "0xd4d1111111111111111111111111111111111111"
+
+
+def test_pdf_footer_line_is_not_appended_to_wrapped_address(client: TestClient) -> None:
+    address = "0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e35d9a1e8"
+    sample = f"""
+    BYBIT Proof of Reserves
+    Audited wallets
+    Network Address
+    Aptos {address}
+    Hacken's BYBIT Proof of Reserve
+    Page 12
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert len(preview["candidates_preview"]) == 1
+    assert preview["candidates_preview"][0]["address"] == address
+
+
+def test_pdf_bybit_por_fallback_profile_keeps_cex_context(client: TestClient) -> None:
+    sample = """
+    Proof of Reserves Audit Report BYBIT
+    Auditee Bybit
+    No audited wallet rows on this excerpt.
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert preview["candidates_preview"] == []
+    assert preview["profile"]["category"] == "cex"
+    assert preview["profile"]["sub_category"] == "reserve_boundary"
+    assert "cex_por_wallet" in preview["profile"]["expected_roles"]
+    assert preview["profile"]["metadata"]["pdf_parser_mode"] == "pdf_text_fallback"
+
+
+def test_pdf_audited_wallet_heading_without_rows_has_specific_warning(client: TestClient) -> None:
+    sample = """
+    BYBIT Proof of Reserves Audit Report
+    Audited wallets
+    Network
+    Address
+    No wallet rows available in this fixture.
+    Conclusion
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert preview["profile"]["metadata"]["audited_wallet_heading_found"] is True
+    assert preview["profile"]["metadata"]["audited_wallet_rows_detected"] == 0
+    assert "pdf_audited_wallet_section_found_but_no_rows" in preview["warnings"]
+
+
 def test_candidate_save_rolls_back_without_context_or_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     preview = _upload_preview(
         client,
