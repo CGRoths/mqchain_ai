@@ -357,7 +357,9 @@ class PdfAdapter(SourceAdapter):
         text_normalized = normalized_text != text
         text = normalized_text
         entity_name = _detect_pdf_entity(text)
-        table_preview = _parse_hacken_audited_wallet_rows(text)
+        table_preview = _parse_hacken_layout_wallet_rows(raw_content, text, entity_name) if raw_content and _is_hacken_por_text(text, entity_name) else []
+        if not table_preview:
+            table_preview = _parse_hacken_audited_wallet_rows(text)
         diagnostics = _pdf_audited_wallet_diagnostics(text, table_preview)
         if table_preview:
             candidates = _extract_table_candidates(artifact, fingerprint, table_preview, default_source_input_type="pdf_audited_wallet_table")
@@ -683,6 +685,175 @@ def _hacken_wallet_table(rows: list[dict], start_line: int, parser: str, metadat
     }
 
 
+def _parse_hacken_layout_wallet_rows(raw_content: bytes, text: str, entity_name: str | None) -> list[dict]:
+    try:
+        import pdfplumber
+    except Exception:
+        return []
+
+    rows: list[dict] = []
+    in_section = False
+    stop_marker: str | None = None
+    section_line: int | None = None
+    selected_reason: str | None = None
+    try:
+        with pdfplumber.open(BytesIO(raw_content)) as pdf:
+            for page_number, page in enumerate(pdf.pages, start=1):
+                words = page.extract_words(x_tolerance=1, y_tolerance=3, keep_blank_chars=False) or []
+                if not words:
+                    continue
+                page_text = _normalize_pdf_text(page.extract_text(x_tolerance=1, y_tolerance=3) or "")
+                if not in_section:
+                    if not _layout_page_has_real_audited_wallet_header(words, page_text):
+                        continue
+                    in_section = True
+                    section_line = page_number
+                    selected_reason = f"layout_header_page:{page_number}"
+
+                page_stop = _layout_stop_marker(words)
+                if page_stop:
+                    stop_marker = page_stop[1]
+                    words = [word for word in words if float(word["top"]) < page_stop[0]]
+
+                rows.extend(_layout_wallet_rows_from_page(words, entity_name, page_number))
+                if page_stop:
+                    break
+    except Exception:
+        return []
+
+    if not rows:
+        return []
+    return [
+        _hacken_wallet_table(
+            rows,
+            rows[0]["_row_number"],
+            "hacken_audited_wallets_layout",
+            {
+                "parser_stop_marker": stop_marker,
+                "audited_wallet_section_page_or_line": section_line,
+                "rejected_audited_wallet_heading_count": 0,
+                "selected_audited_wallet_heading_reason": selected_reason,
+            },
+        )
+    ]
+
+
+def _layout_page_has_real_audited_wallet_header(words: list[dict], page_text: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", " ", page_text.lower())
+    if "table of contents" in normalized:
+        return False
+    compact = re.sub(r"[^a-z0-9]+", "", page_text.lower())
+    if "auditedwallets" not in compact:
+        return False
+    network_top = None
+    address_top = None
+    for word in words:
+        value = str(word.get("text") or "").strip().lower()
+        if value == "network":
+            network_top = float(word["top"])
+        if value == "address":
+            address_top = float(word["top"])
+    return network_top is not None and address_top is not None and abs(network_top - address_top) <= 8
+
+
+def _layout_stop_marker(words: list[dict]) -> tuple[float, str] | None:
+    lines = _layout_lines(words)
+    for line in lines:
+        normalized = re.sub(r"\s+", " ", line["text"].strip())
+        lower = normalized.lower()
+        if "collateral ratios" in lower:
+            return float(line["top"]), "Collateral Ratios" if "Ratios" in normalized else "Collateral ratios"
+        if lower in HACKEN_STOP_MARKERS:
+            return float(line["top"]), normalized
+    return None
+
+
+def _layout_wallet_rows_from_page(words: list[dict], entity_name: str | None, page_number: int) -> list[dict]:
+    content_words = [
+        word
+        for word in words
+        if 115 <= float(word["top"]) <= 790
+        and not _is_footer_only_line(str(word.get("text") or ""))
+    ]
+    lines = _layout_lines(content_words)
+    data_lines = []
+    for line in lines:
+        text = line["text"].strip()
+        if not text or _is_hacken_stop_line(text) or _is_footer_only_line(text):
+            continue
+        if _is_audited_wallet_heading(text) or _line_has_network_address_header(text):
+            continue
+        if text.lower() in {"network", "address"}:
+            continue
+        left = " ".join(word["text"] for word in line["words"] if float(word["x0"]) < 145).strip()
+        right = " ".join(word["text"] for word in line["words"] if float(word["x0"]) >= 145).strip()
+        data_lines.append({"top": float(line["top"]), "left": left, "right": right, "text": text})
+
+    anchors: list[dict] = []
+    index = 0
+    while index < len(data_lines):
+        line = data_lines[index]
+        if not line["left"]:
+            index += 1
+            continue
+        match = _match_known_network_prefix(line["left"])
+        consumed = 1
+        if match and not match[1] and index + 1 < len(data_lines) and data_lines[index + 1]["left"]:
+            combined = f"{line['left']} {data_lines[index + 1]['left']}"
+            combined_match = _match_known_network_prefix(combined)
+            if combined_match and combined_match[0] != match[0]:
+                match = combined_match
+                consumed = 2
+        if match:
+            network, remainder = match
+            top_values = [data_lines[index + offset]["top"] for offset in range(consumed)]
+            anchors.append({"network": network, "remainder": remainder, "top": sum(top_values) / len(top_values), "line_index": index, "consumed": consumed})
+            index += consumed
+            continue
+        index += 1
+
+    rows: list[dict] = []
+    for anchor_index, anchor in enumerate(anchors):
+        previous_top = anchors[anchor_index - 1]["top"] if anchor_index else None
+        next_top = anchors[anchor_index + 1]["top"] if anchor_index + 1 < len(anchors) else None
+        start = ((previous_top + anchor["top"]) / 2) if previous_top is not None else anchor["top"] - 18
+        end = ((anchor["top"] + next_top) / 2) if next_top is not None else anchor["top"] + 24
+        pieces: list[str] = [anchor["remainder"]] if anchor["remainder"] else []
+        for line in data_lines:
+            if start <= line["top"] < end and line["right"]:
+                pieces.append(line["right"])
+        address = _address_from_network_pieces(anchor["network"], pieces)
+        if not address:
+            continue
+        rows.append(
+            {
+                "Entity": entity_name,
+                "Network": anchor["network"],
+                "Address": address,
+                "Role": "audited wallet",
+                "Evidence Type": "audited_wallet",
+                "Confidence": "85",
+                "_row_number": page_number * 1000 + len(rows) + 1,
+            }
+        )
+    return rows
+
+
+def _layout_lines(words: list[dict]) -> list[dict]:
+    sorted_words = sorted(words, key=lambda word: (float(word["top"]), float(word["x0"])))
+    lines: list[dict] = []
+    for word in sorted_words:
+        top = float(word["top"])
+        if not lines or abs(float(lines[-1]["top"]) - top) > 4:
+            lines.append({"top": top, "words": [word]})
+        else:
+            lines[-1]["words"].append(word)
+    for line in lines:
+        line["words"].sort(key=lambda word: float(word["x0"]))
+        line["text"] = " ".join(str(word.get("text") or "") for word in line["words"])
+    return lines
+
+
 def _parse_compact_hacken_wallet_rows(text: str) -> list[dict]:
     rows, _metadata = _parse_compact_hacken_wallet_rows_with_metadata(text)
     return rows
@@ -859,6 +1030,8 @@ def _pdf_audited_wallet_diagnostics(text: str, tables: list[dict]) -> dict:
 
 def _hacken_pdf_parser_mode(tables: list[dict]) -> str:
     parser = (tables[0].get("metadata") or {}).get("parser") if tables else None
+    if parser == "hacken_audited_wallets_layout":
+        return "hacken_audited_wallet_layout_table"
     if parser == "hacken_audited_wallets_compact":
         return "hacken_audited_wallet_compact_table"
     if parser == "hacken_audited_wallets_line":
@@ -1282,7 +1455,10 @@ def _candidate_from_address(
         warnings.append("unrecognized_source_network")
     if raw_reference.get("validator_public_key"):
         warnings.append("validator_public_key_metadata_only")
-    normalized = clean.lower() if clean.startswith("0x") else clean
+    if network.canonical_chain == "xdc":
+        normalized = f"xdc{clean[2:].lower()}" if clean.lower().startswith("0x") else clean.lower()
+    else:
+        normalized = clean.lower() if clean.startswith("0x") else clean
     confidence = _confidence_from_value(raw_reference.get("confidence")) or (70 if raw_network else 45)
     entity = raw_reference.get("row_entity") or _entity_from_sheet_name(source_sheet)
     return CandidatePreview(
@@ -1391,6 +1567,8 @@ def _valid_address_for_network(address: str, network) -> bool:
         return chain_guess == "dogecoin"
     if AVALANCHE_X_RE.fullmatch(address):
         return network.canonical_chain == "avalanche-x"
+    if TEZOS_RE.fullmatch(address):
+        return chain_guess == "tezos"
     if SOLANA_RE.fullmatch(address):
         return chain_guess == "solana"
     if HEDERA_RE.fullmatch(address):
@@ -1405,8 +1583,6 @@ def _valid_address_for_network(address: str, network) -> bool:
         return chain_guess == "near"
     if NOBLE_RE.fullmatch(address):
         return network.canonical_chain == "noble"
-    if TEZOS_RE.fullmatch(address):
-        return chain_guess == "tezos"
     return False
 
 

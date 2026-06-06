@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from app.db.database import Base, SessionLocal, engine, init_db
 from app.ingestion.intake_orchestrator import IntakeOrchestrator
+from app.ingestion.source_adapters import _layout_wallet_rows_from_page
 from app.models.intake import AddressCandidate, AddressEvidence, SourceJob
 from app.services.registry_service import RegistryPromotionService
 from app.main import app
@@ -576,6 +577,154 @@ def test_pdf_kucoin_hacken_line_table_parses_split_networks_and_wrapped_addresse
     assert by_network["zkSync Era"] == zksync
     assert metadata["candidate_rows_created"] == metadata["raw_wallet_rows_detected"]
     assert "pdf_loose_text_fallback_used" not in preview["warnings"]
+
+
+def test_layout_wallet_rows_reconstruct_column_major_mexc_sample() -> None:
+    def word(text: str, x0: float, top: float) -> dict:
+        return {"text": text, "x0": x0, "x1": x0 + len(text) * 6, "top": top, "bottom": top + 10}
+
+    algorand = "M3IAMWFYEIJWLWFIIOEDFOLGIVMEOB3F4I3CA4BIAHJENHUUSX63APOXXM"
+    aptos = "0xe8ca094fec460329aaccc2a644dc73c5e39f1a2ad6e97f82b6cbdc1a5949b9ea"
+    words = [
+        word("Network", 62, 160),
+        word("Address", 158, 160),
+        word(algorand[:58], 158, 188),
+        word("Algorand", 62, 197),
+        word(algorand[58:], 158, 206),
+        word(aptos[:62], 158, 228),
+        word("Aptos", 62, 237),
+        word(aptos[62:], 158, 246),
+        word("Bitcoin", 62, 270),
+        word("13uZyaPbt4rTwYQ8xWFySVUzWH3pk2P5c7", 158, 270),
+        word("BSC", 62, 294),
+        word("0x2e8f79ad740de90dc5f5a9f0d8d9661a60725e64", 158, 294),
+    ]
+    rows = _layout_wallet_rows_from_page(words, "MEXC", 9)
+    by_network = {row["Network"]: row["Address"] for row in rows}
+    assert by_network["Algorand"] == algorand
+    assert by_network["Aptos"] == aptos
+    assert by_network["Bitcoin"] == "13uZyaPbt4rTwYQ8xWFySVUzWH3pk2P5c7"
+    assert by_network["BSC"] == "0x2e8f79ad740de90dc5f5a9f0d8d9661a60725e64"
+
+
+def test_xdc_prefixed_and_0x_addresses_normalize_to_xdc(client: TestClient) -> None:
+    preview = _upload_preview(
+        client,
+        "xdc.csv",
+        (
+            "Entity,Network,Address\n"
+            "KuCoin,XDC,xdcF29f049144467b3dc55e19205c30C1737942F23a\n"
+            "KuCoin,XDC,0x2933782b5a8d72f2754103d1489614f29bfa4625\n"
+        ).encode(),
+    )
+    by_address = {candidate["address"]: candidate for candidate in preview["candidates_preview"]}
+    assert by_address["xdcF29f049144467b3dc55e19205c30C1737942F23a"]["normalized_address"] == "xdcf29f049144467b3dc55e19205c30c1737942f23a"
+    assert by_address["0x2933782b5a8d72f2754103d1489614f29bfa4625"]["normalized_address"] == "xdc2933782b5a8d72f2754103d1489614f29bfa4625"
+    assert all(candidate["chain_slug"] == "xdc" for candidate in preview["candidates_preview"])
+
+
+def test_real_mexc_pdf_layout_parser_extracts_full_wallet_section(client: TestClient) -> None:
+    path = Path(r"C:\Users\User\Downloads\MEXC_PoR_Audit_20260510.pdf")
+    if not path.exists():
+        pytest.skip("real MEXC PDF fixture is not available")
+    preview = _upload_preview(client, path.name, path.read_bytes())
+    metadata = preview["profile"]["metadata"]
+    required_networks = {
+        "Algorand",
+        "Aptos",
+        "Arbitrum",
+        "Avalanche-C",
+        "Base",
+        "Bitcoin",
+        "BSC",
+        "Celo",
+        "Ethereum",
+        "Kaia",
+        "Linea",
+        "Morph",
+        "Near",
+        "Optimism",
+        "Plasma",
+        "Polkadot AH",
+        "Polygon",
+        "SEI",
+        "Solana",
+        "Sonic",
+        "Starknet",
+        "Sui",
+        "Ton",
+        "Tron",
+        "Unichain",
+        "XDC",
+        "zkSync Lite",
+    }
+    assert preview["profile"]["entity_name"] == "MEXC"
+    assert preview["profile"]["category"] == "cex"
+    assert preview["profile"]["sub_category"] == "reserve_boundary"
+    assert metadata["pdf_parser_mode"] == "hacken_audited_wallet_layout_table"
+    assert metadata["parser_stop_marker"] == "Collateral ratios"
+    assert metadata["raw_wallet_rows_detected"] > 23
+    assert metadata["candidate_rows_created"] == metadata["raw_wallet_rows_detected"]
+    assert required_networks <= set(metadata["network_counts"])
+    assert preview["warnings"] == []
+    assert all(candidate["source_network"] for candidate in preview["candidates_preview"])
+    assert all(candidate["confidence_initial"] != 45 for candidate in preview["candidates_preview"])
+
+
+def test_real_kucoin_pdf_layout_parser_extracts_full_wallet_section(client: TestClient) -> None:
+    path = Path(r"C:\Users\User\Downloads\kucoin_report.pdf")
+    if not path.exists():
+        pytest.skip("real KuCoin PDF fixture is not available")
+    preview = _upload_preview(client, path.name, path.read_bytes())
+    metadata = preview["profile"]["metadata"]
+    required_networks = {
+        "Aptos",
+        "Arbitrum",
+        "Aurora",
+        "Avalanche-C",
+        "Base",
+        "Blast",
+        "Bitcoin",
+        "BSC",
+        "Ethereum",
+        "Hyperliquid",
+        "Kava EVM",
+        "KCC",
+        "Linea",
+        "Manta",
+        "Merlin",
+        "Monad",
+        "Near",
+        "Noble",
+        "Optimism",
+        "Plasma",
+        "Polygon",
+        "Scroll",
+        "Sonic",
+        "Solana",
+        "Statemint",
+        "Starknet",
+        "Sui",
+        "Taiko",
+        "Tezos",
+        "Ton",
+        "Tron",
+        "XDC",
+        "Zircuit",
+        "zkLink Nova",
+        "zkSync Era",
+    }
+    assert preview["profile"]["entity_name"] == "KuCoin"
+    assert preview["profile"]["category"] == "cex"
+    assert preview["profile"]["sub_category"] == "reserve_boundary"
+    assert metadata["pdf_parser_mode"] == "hacken_audited_wallet_layout_table"
+    assert metadata["parser_stop_marker"] == "Collateral Ratios"
+    assert metadata["raw_wallet_rows_detected"] > 67
+    assert metadata["candidate_rows_created"] == metadata["raw_wallet_rows_detected"]
+    assert required_networks <= set(metadata["network_counts"])
+    assert preview["warnings"] == []
+    assert all(candidate["source_network"] for candidate in preview["candidates_preview"])
+    assert all(candidate["confidence_initial"] != 45 for candidate in preview["candidates_preview"])
 
 
 def test_candidate_save_rolls_back_without_context_or_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
