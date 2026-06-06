@@ -368,6 +368,58 @@ def test_pdf_audited_wallet_heading_without_rows_has_specific_warning(client: Te
     assert "pdf_audited_wallet_section_found_but_no_rows" in preview["warnings"]
 
 
+def test_pdf_compact_hacken_audited_wallet_rows_parse(client: TestClient) -> None:
+    sample = (
+        "Proof of Reserves Audit Report BYBIT"
+        "Audited walletsNetworkAddress"
+        "Aptos0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e35d9a1e8"
+        "Aptos0x4cead285873b1bbbbd7fecc3c103e539f5b2ab7563b4c3d9e98f9f013a014e5a"
+        "Arbitrum0x18673311fec54ac2244a602e6d91845553d24e62"
+        "Collateral ratios"
+    )
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    candidates = preview["candidates_preview"]
+    assert len(candidates) == 3
+    assert [candidate["source_network"] for candidate in candidates] == ["Aptos", "Aptos", "Arbitrum"]
+    assert candidates[0]["address"] == "0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e35d9a1e8"
+    assert candidates[1]["address"] == "0x4cead285873b1bbbbd7fecc3c103e539f5b2ab7563b4c3d9e98f9f013a014e5a"
+    assert candidates[2]["address"] == "0x18673311fec54ac2244a602e6d91845553d24e62"
+    assert preview["profile"]["metadata"]["pdf_parser_mode"] == "hacken_audited_wallet_compact_table"
+    assert preview["profile"]["metadata"]["audited_wallet_rows_detected"] == 3
+    assert preview["profile"]["metadata"]["source_input_type"] == "pdf_audited_wallet_table"
+    assert preview["profile"]["table_count"] == 1
+    assert "pdf_loose_text_fallback_used" not in preview["warnings"]
+
+
+def test_pdf_compact_hacken_parser_normalizes_ligatures(client: TestClient) -> None:
+    sample = (
+        "Proof of Reserves Audit Report BYBIT"
+        "Audited walletsNetworkAddress"
+        "Arbitrum0x83d8b993ﬀ9795aee4abe8597c1925b50b30d5be"
+        "Conclusion"
+    )
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode("utf-8"))
+    assert len(preview["candidates_preview"]) == 1
+    assert preview["candidates_preview"][0]["source_network"] == "Arbitrum"
+    assert preview["candidates_preview"][0]["address"] == "0x83d8b993ff9795aee4abe8597c1925b50b30d5be"
+    assert preview["profile"]["metadata"]["pdf_text_normalized"] is True
+    assert preview["profile"]["metadata"]["pdf_parser_mode"] == "hacken_audited_wallet_compact_table"
+
+
+def test_pdf_compact_hacken_parser_does_not_parse_footer(client: TestClient) -> None:
+    sample = (
+        "Proof of Reserves Audit Report BYBIT"
+        "Audited walletsNetworkAddress"
+        "Hacken's BYBIT Proof of Reserve Page8"
+    )
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert preview["candidates_preview"] == []
+    assert preview["profile"]["metadata"]["audited_wallet_heading_found"] is True
+    assert preview["profile"]["metadata"]["network_address_header_found"] is True
+    assert preview["profile"]["metadata"]["audited_wallet_rows_detected"] == 0
+    assert "pdf_audited_wallet_section_found_but_no_rows" in preview["warnings"]
+
+
 def test_candidate_save_rolls_back_without_context_or_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     preview = _upload_preview(
         client,

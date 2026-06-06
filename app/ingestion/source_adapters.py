@@ -30,7 +30,20 @@ BTC_RE = re.compile(r"^(?:bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25
 TRON_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 TON_RE = re.compile(r"^(?:EQ|UQ)[A-Za-z0-9_-]{46}$")
 SUBSTRATE_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,64}$")
+COSMOS_RE = re.compile(r"^cosmos1[0-9a-z]{20,80}$", re.IGNORECASE)
+DYDX_RE = re.compile(r"^dydx1[0-9a-z]{20,80}$", re.IGNORECASE)
+DOGE_RE = re.compile(r"^D[1-9A-HJ-NP-Za-km-z]{25,34}$")
+AVALANCHE_X_RE = re.compile(r"^X-avax1[0-9a-z]{20,80}$", re.IGNORECASE)
 HACKEN_STOP_MARKERS = {"collateral ratios", "team composition", "conclusion", "disclaimers"}
+PDF_LIGATURE_TRANSLATION = str.maketrans(
+    {
+        "ﬀ": "ff",
+        "ﬁ": "fi",
+        "ﬂ": "fl",
+        "ﬃ": "ffi",
+        "ﬄ": "ffl",
+    }
+)
 HACKEN_NETWORKS = sorted(
     {
         "Aptos",
@@ -81,6 +94,65 @@ HACKEN_NETWORKS = sorted(
     key=lambda value: len(value.split()),
     reverse=True,
 )
+COMPACT_HACKEN_NETWORK_ALIASES = {
+    "Aptos": "Aptos",
+    "Arbitrum": "Arbitrum",
+    "ArbitrumNova": "Arbitrum Nova",
+    "ArbitrumOne": "Arbitrum One",
+    "Avalanche-C": "Avalanche-C",
+    "AvalancheC": "Avalanche-C",
+    "Avalanche-X": "Avalanche-X",
+    "AvalancheX": "Avalanche-X",
+    "Base": "Base",
+    "Bera": "Bera",
+    "Bitcoin": "Bitcoin",
+    "BSC": "BSC",
+    "Celo": "Celo",
+    "Codex": "Codex",
+    "Corn": "Corn",
+    "Cosmos": "Cosmos",
+    "Dogecoin": "Dogecoin",
+    "DYDX": "DYDX",
+    "Ethereum": "Ethereum",
+    "Hedera": "Hedera",
+    "HyperEVM": "HyperEVM",
+    "Kaia": "Kaia",
+    "KavaEVM": "Kava EVM",
+    "Linea": "Linea",
+    "Litecoin": "Litecoin",
+    "Manta": "Manta",
+    "Mantle": "Mantle",
+    "Monad": "Monad",
+    "Optimism": "Optimism",
+    "Plasma": "Plasma",
+    "PolkadotAH": "Polkadot AH",
+    "Polygon": "Polygon",
+    "Ripple": "Ripple",
+    "XRPLedger": "XRP Ledger",
+    "Scroll": "Scroll",
+    "SeiEVM": "Sei EVM",
+    "Solana": "Solana",
+    "Sonic": "Sonic",
+    "Sui": "Sui",
+    "Ton": "Ton",
+    "Tron": "Tron",
+    "Vaulta": "Vaulta",
+    "XDC": "XDC",
+    "ZKSyncEra": "ZKSync Era",
+    "ZKSyncLite": "ZKSync Lite",
+}
+COMPACT_HACKEN_NETWORKS = sorted(
+    {re.sub(r"\s+", "", alias): canonical for alias, canonical in COMPACT_HACKEN_NETWORK_ALIASES.items()}.items(),
+    key=lambda item: len(item[0]),
+    reverse=True,
+)
+COMPACT_HACKEN_STOP_MARKERS = [
+    "collateral ratios",
+    "team composition",
+    "conclusion",
+    "disclaimers",
+    "Hacken's BYBIT Proof of Reserve",
+]
 CONTROL_SHEET_NAMES = {
     "summary",
     "schema",
@@ -178,18 +250,23 @@ class PdfAdapter(SourceAdapter):
             except Exception:
                 text = raw_content[:16_000].decode("utf-8", errors="ignore")
                 warnings.append("pdf_text_extraction_fallback")
+        normalized_text = _normalize_pdf_text(text)
+        text_normalized = normalized_text != text
+        text = normalized_text
         entity_name = _detect_pdf_entity(text)
         table_preview = _parse_hacken_audited_wallet_rows(text)
         diagnostics = _pdf_audited_wallet_diagnostics(text, table_preview)
         if table_preview:
             candidates = _extract_table_candidates(artifact, fingerprint, table_preview, default_source_input_type="pdf_audited_wallet_table")
-            diagnostics["pdf_parser_mode"] = "hacken_audited_wallet_table"
+            diagnostics["pdf_parser_mode"] = _hacken_pdf_parser_mode(table_preview)
             metadata = {
                 "source_input_type": "pdf_audited_wallet_table",
                 "entity_name": entity_name,
                 "category": "cex",
                 "sub_category": "reserve_boundary",
                 "expected_roles": ["cex_por_wallet"],
+                "table_count": 1,
+                "pdf_text_normalized": text_normalized,
                 "warnings": warnings,
                 **diagnostics,
             }
@@ -202,6 +279,7 @@ class PdfAdapter(SourceAdapter):
             metadata = {
                 "source_input_type": "pdf_text_fallback",
                 "entity_name": entity_name,
+                "pdf_text_normalized": text_normalized,
                 "warnings": warnings,
                 **diagnostics,
             }
@@ -444,15 +522,133 @@ def _parse_hacken_audited_wallet_rows(text: str) -> list[dict]:
             }
         )
 
-    return [
-        {
-            "name": "audited_wallets",
-            "headers": ["Entity", "Network", "Address", "Role", "Evidence Type", "Confidence"],
-            "rows": rows,
-            "start_line": rows[0]["_row_number"] if rows else start_index + 1,
-            "metadata": {"parser": "hacken_audited_wallets"},
-        }
-    ] if rows else []
+    if rows:
+        return [_hacken_wallet_table(rows, rows[0]["_row_number"], "hacken_audited_wallets")]
+
+    if section["heading_found"] and section["header_found"]:
+        compact_rows = _parse_compact_hacken_wallet_rows(text)
+        if compact_rows:
+            return [_hacken_wallet_table(compact_rows, start_index + 1, "hacken_audited_wallets_compact")]
+    return []
+
+
+def _hacken_wallet_table(rows: list[dict], start_line: int, parser: str) -> dict:
+    return {
+        "name": "audited_wallets",
+        "headers": ["Entity", "Network", "Address", "Role", "Evidence Type", "Confidence"],
+        "rows": rows,
+        "start_line": start_line,
+        "metadata": {"parser": parser},
+    }
+
+
+def _parse_compact_hacken_wallet_rows(text: str) -> list[dict]:
+    normalized = _normalize_pdf_text(text)
+    heading_match = re.search(r"audited\s*wallets", normalized, flags=re.IGNORECASE)
+    if not heading_match:
+        return []
+    header_match = re.search(r"network\s*address", normalized[heading_match.end() :], flags=re.IGNORECASE)
+    if not header_match:
+        return []
+
+    content_start = heading_match.end() + header_match.end()
+    content = normalized[content_start:]
+    stop_index = _compact_hacken_stop_index(content)
+    if stop_index is not None:
+        content = content[:stop_index]
+    compact = re.sub(r"\s+", "", content)
+    if not compact:
+        return []
+
+    entity_name = _detect_pdf_entity(text)
+    rows: list[dict] = []
+    index = 0
+    while index < len(compact):
+        network_match = _compact_network_at(compact, index)
+        if network_match is None:
+            index += 1
+            continue
+        network, network_end = network_match
+        address = _compact_address_for_network(compact, network_end, network)
+        if not address:
+            index = max(network_end, index + 1)
+            continue
+        rows.append(
+            {
+                "Entity": entity_name,
+                "Network": network,
+                "Address": address,
+                "Role": "audited wallet",
+                "Evidence Type": "audited_wallet",
+                "Confidence": "85",
+                "_row_number": 1,
+            }
+        )
+        index = network_end + len(address)
+    return rows
+
+
+def _compact_hacken_stop_index(content: str) -> int | None:
+    patterns = [
+        r"collateral\s*ratios",
+        r"team\s*composition",
+        r"conclusion",
+        r"disclaimers",
+        r"hacken'?s\s*bybit\s*proof\s*of\s*reserve",
+        r"page\s*\d+",
+    ]
+    matches = [match.start() for pattern in patterns if (match := re.search(pattern, content, flags=re.IGNORECASE))]
+    return min(matches) if matches else None
+
+
+def _compact_network_at(compact: str, index: int) -> tuple[str, int] | None:
+    for token, canonical in COMPACT_HACKEN_NETWORKS:
+        if compact[index : index + len(token)].lower() == token.lower():
+            return canonical, index + len(token)
+    return None
+
+
+def _compact_address_for_network(compact: str, index: int, network: str) -> str | None:
+    normalized_network = NetworkNormalizer.normalize(network)
+    if normalized_network.chain_guess in {"aptos", "sui"}:
+        return _compact_0x_address(compact, index, normalized_network, min_hex=40, max_hex=64)
+    if normalized_network.chain_guess == "evm":
+        return _compact_0x_address(compact, index, normalized_network, min_hex=40, max_hex=40)
+
+    regexes = [BTC_RE, TRON_RE, TON_RE, XRP_RE, COSMOS_RE, DYDX_RE, DOGE_RE, AVALANCHE_X_RE]
+    for regex in regexes:
+        for end in range(min(len(compact), index + 96), index + 7, -1):
+            candidate = compact[index:end]
+            if not regex.fullmatch(candidate):
+                continue
+            if not _compact_boundary_after_address(compact, end):
+                continue
+            if _valid_address_for_network(candidate, normalized_network):
+                return candidate
+    return None
+
+
+def _compact_0x_address(compact: str, index: int, network, *, min_hex: int, max_hex: int) -> str | None:
+    if compact[index : index + 2].lower() != "0x":
+        return None
+    for hex_length in range(max_hex, min_hex - 1, -1):
+        end = index + 2 + hex_length
+        candidate = compact[index:end]
+        if not re.fullmatch(r"0x[a-fA-F0-9]+", candidate):
+            continue
+        if not _compact_boundary_after_address(compact, end):
+            continue
+        if _valid_address_for_network(candidate, network):
+            return candidate
+    return None
+
+
+def _compact_boundary_after_address(compact: str, index: int) -> bool:
+    if index >= len(compact):
+        return True
+    if _compact_network_at(compact, index) is not None:
+        return True
+    return _compact_hacken_stop_index(compact[index : index + 80]) == 0
 
 
 def _pdf_audited_wallet_diagnostics(text: str, tables: list[dict]) -> dict:
@@ -477,6 +673,13 @@ def _pdf_audited_wallet_diagnostics(text: str, tables: list[dict]) -> dict:
     }
 
 
+def _hacken_pdf_parser_mode(tables: list[dict]) -> str:
+    parser = (tables[0].get("metadata") or {}).get("parser") if tables else None
+    if parser == "hacken_audited_wallets_compact":
+        return "hacken_audited_wallet_compact_table"
+    return "hacken_audited_wallet_table"
+
+
 def _audited_wallet_section_start(lines: list[tuple[int, str]]) -> int | None:
     return _audited_wallet_section_state(lines)["start_index"]
 
@@ -485,20 +688,28 @@ def _audited_wallet_section_state(lines: list[tuple[int, str]]) -> dict:
     for index, (_line_number, line) in enumerate(lines):
         if not _is_audited_wallet_heading(line):
             continue
+        if _line_has_network_address_header(line):
+            return {
+                "heading_found": True,
+                "header_found": True,
+                "heading_index": index,
+                "start_index": index,
+            }
         network_line: int | None = None
         address_line: int | None = None
         for header_index in range(index + 1, min(index + 10, len(lines))):
-            header = re.sub(r"\s+", " ", lines[header_index][1].lower()).strip()
+            header_line = lines[header_index][1]
+            header = re.sub(r"\s+", " ", header_line.lower()).strip()
             if "network" in header and network_line is None:
                 network_line = header_index
             if "address" in header and address_line is None:
                 address_line = header_index
-            if network_line is not None and address_line is not None:
+            if (network_line is not None and address_line is not None) or _line_has_network_address_header(header_line):
                 return {
                     "heading_found": True,
                     "header_found": True,
                     "heading_index": index,
-                    "start_index": max(network_line, address_line) + 1,
+                    "start_index": max(value for value in [network_line, address_line, header_index] if value is not None) + 1,
                 }
         return {"heading_found": True, "header_found": False, "heading_index": index, "start_index": index + 1}
     return {"heading_found": False, "header_found": False, "heading_index": None, "start_index": None}
@@ -508,6 +719,11 @@ def _is_audited_wallet_heading(line: str) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", " ", line.lower()).strip()
     compact = re.sub(r"[^a-z0-9]+", "", line.lower())
     return "audited wallets" in normalized or "auditedwallets" in compact
+
+
+def _line_has_network_address_header(line: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", line.lower())
+    return "networkaddress" in compact
 
 
 def _is_hacken_stop_line(line: str) -> bool:
@@ -850,6 +1066,14 @@ def _valid_address_for_network(address: str, network) -> bool:
         return chain_guess == "ton"
     if SUBSTRATE_RE.fullmatch(address):
         return chain_guess == "substrate"
+    if COSMOS_RE.fullmatch(address):
+        return network.canonical_chain == "cosmos"
+    if DYDX_RE.fullmatch(address):
+        return network.canonical_chain == "dydx"
+    if DOGE_RE.fullmatch(address):
+        return chain_guess == "dogecoin"
+    if AVALANCHE_X_RE.fullmatch(address):
+        return network.canonical_chain == "avalanche-x"
     return False
 
 
@@ -921,6 +1145,15 @@ def _decode(content: bytes, fallback: str = "") -> str:
     return content.decode("utf-8-sig", errors="replace")
 
 
+def _normalize_pdf_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = text.translate(PDF_LIGATURE_TRANSLATION)
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"[\t\f\v\u00a0\u1680\u180e\u2000-\u200b\u2028\u2029\u202f\u205f\u3000]", " ", normalized)
+    return normalized
+
+
 def _skip_xlsx_sheet(name: str | None) -> bool:
     if not name:
         return True
@@ -978,6 +1211,12 @@ def _infer_address_family(address: str) -> str | None:
         return "xrp"
     if address.startswith(("EQ", "UQ")):
         return "ton"
+    if lower.startswith("cosmos1") or lower.startswith("dydx1"):
+        return "cosmos"
+    if address.startswith("D"):
+        return "dogecoin"
+    if lower.startswith("x-avax1"):
+        return "avalanche"
     return None
 
 
