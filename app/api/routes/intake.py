@@ -93,13 +93,14 @@ async def save_upload_job(
 @api_router.post("/jobs/{source_job_id}/run", response_model=RunExtractionResponse)
 async def run_job(source_job_id: int, db: DBSession) -> RunExtractionResponse:
     try:
-        job, count = await IntakeOrchestrator(db).run_extraction(source_job_id)
+        job, count, reused_existing = await IntakeOrchestrator(db).run_extraction(source_job_id)
         return RunExtractionResponse(
             source_job_id=job.id,
             extracted_candidates=count,
             status=job.status,
             final_source_type=job.final_source_type,
             adapter_name=job.adapter_name,
+            reused_existing=reused_existing,
             fatal_errors=[],
         )
     except IntakeError as exc:
@@ -154,6 +155,7 @@ INTAKE_CONSOLE_HTML = """
     .candidate-table th { background: #edf3f2; color: #30424a; font-size: 12px; }
     .candidate-table td { background: #fff; }
     .candidate-table .address { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+    .empty-state { border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); padding: 10px; margin-bottom: 12px; background: #fafbfc; }
     pre { min-height: 360px; max-height: 70vh; overflow: auto; margin: 0; padding: 12px; border-radius: 8px; background: #101820; color: #e8eef3; white-space: pre-wrap; }
     [hidden] { display: none !important; }
     @media (max-width: 860px) { main { grid-template-columns: 1fr; } .tabs, .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -196,8 +198,8 @@ INTAKE_CONSOLE_HTML = """
       <div class="grid">
         <div class="metric"><span>Final Type</span><strong id="final_source_type">-</strong></div>
         <div class="metric"><span>Adapter</span><strong id="adapter_name">-</strong></div>
-        <div class="metric"><span>Confidence</span><strong id="fingerprint_confidence">-</strong></div>
-        <div class="metric"><span>Override</span><strong id="override_reason">-</strong></div>
+        <div class="metric"><span>Status</span><strong id="status">-</strong></div>
+        <div class="metric"><span>Extracted</span><strong id="extracted_candidates">-</strong></div>
       </div>
       <div id="candidateTableWrap" hidden>
         <table class="candidate-table" aria-label="Candidate preview table">
@@ -215,6 +217,39 @@ INTAKE_CONSOLE_HTML = """
           <tbody id="candidateRows"></tbody>
         </table>
       </div>
+      <div id="evidenceTableWrap" hidden>
+        <table class="candidate-table" aria-label="Evidence table">
+          <thead>
+            <tr>
+              <th>Evidence ID</th>
+              <th>Candidate ID</th>
+              <th>Evidence Type</th>
+              <th>Source Type</th>
+              <th>Adapter</th>
+              <th>File / URL</th>
+              <th>Row</th>
+              <th>Page</th>
+              <th>Confidence Reason</th>
+            </tr>
+          </thead>
+          <tbody id="evidenceRows"></tbody>
+        </table>
+      </div>
+      <div id="documentTableWrap" hidden>
+        <table class="candidate-table" aria-label="Document table">
+          <thead>
+            <tr>
+              <th>Document ID</th>
+              <th>Source Job</th>
+              <th>Title</th>
+              <th>Content Type</th>
+              <th>File / URL</th>
+            </tr>
+          </thead>
+          <tbody id="documentRows"></tbody>
+        </table>
+      </div>
+      <div id="emptyState" class="empty-state" hidden></div>
       <pre id="output">{}</pre>
     </section>
   </main>
@@ -225,7 +260,14 @@ INTAKE_CONSOLE_HTML = """
     const setVal = (id, value) => { document.getElementById(id).value = value || ""; };
     const candidatesFrom = data => Array.isArray(data) ? data : (Array.isArray(data.candidates_preview) ? data.candidates_preview : []);
     const cell = value => String(value ?? "-").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    const hideTables = () => {
+      document.getElementById("candidateTableWrap").hidden = true;
+      document.getElementById("evidenceTableWrap").hidden = true;
+      document.getElementById("documentTableWrap").hidden = true;
+      document.getElementById("emptyState").hidden = true;
+    };
     const renderCandidateTable = data => {
+      hideTables();
       const rows = candidatesFrom(data);
       const wrap = document.getElementById("candidateTableWrap");
       const body = document.getElementById("candidateRows");
@@ -242,16 +284,59 @@ INTAKE_CONSOLE_HTML = """
         </tr>
       `).join("");
     };
-    const show = data => {
-      renderCandidateTable(data);
+    const evidenceRowValue = (item, key) => item.payload?.[key] ?? item.payload?.raw_reference?.[key] ?? "-";
+    const renderEvidenceTable = data => {
+      hideTables();
+      const rows = Array.isArray(data) ? data : [];
+      const wrap = document.getElementById("evidenceTableWrap");
+      const body = document.getElementById("evidenceRows");
+      const empty = document.getElementById("emptyState");
+      wrap.hidden = rows.length === 0;
+      empty.hidden = rows.length !== 0;
+      empty.textContent = rows.length ? "" : "No evidence rows found for this source job. Check Source Job ID or run extraction first.";
+      body.innerHTML = rows.map(item => `
+        <tr>
+          <td>${cell(item.id)}</td>
+          <td>${cell(item.candidate_id)}</td>
+          <td>${cell(item.evidence_type)}</td>
+          <td>${cell(item.final_source_type || item.source_type)}</td>
+          <td>${cell(item.adapter_name)}</td>
+          <td>${cell(item.file_path || item.source_url)}</td>
+          <td>${cell(evidenceRowValue(item, "row_number"))}</td>
+          <td>${cell(evidenceRowValue(item, "page_number"))}</td>
+          <td>${cell(item.confidence_reason)}</td>
+        </tr>
+      `).join("");
+    };
+    const renderDocumentTable = data => {
+      hideTables();
+      const rows = Array.isArray(data) ? data : [];
+      const wrap = document.getElementById("documentTableWrap");
+      const body = document.getElementById("documentRows");
+      wrap.hidden = rows.length === 0;
+      body.innerHTML = rows.map(item => `
+        <tr>
+          <td>${cell(item.id)}</td>
+          <td>${cell(item.source_job_id)}</td>
+          <td>${cell(item.document_title)}</td>
+          <td>${cell(item.content_type)}</td>
+          <td>${cell(item.file_path || item.canonical_source_url)}</td>
+        </tr>
+      `).join("");
+    };
+    const show = (data, view = "candidates") => {
+      if (view === "evidence") renderEvidenceTable(data);
+      else if (view === "documents") renderDocumentTable(data);
+      else renderCandidateTable(data);
       output.textContent = JSON.stringify(data, null, 2);
       document.getElementById("final_source_type").textContent = data.final_source_type || "-";
       document.getElementById("adapter_name").textContent = data.adapter_name || "-";
-      document.getElementById("fingerprint_confidence").textContent = data.fingerprint_confidence ?? "-";
-      document.getElementById("override_reason").textContent = data.override_reason || "-";
+      document.getElementById("status").textContent = data.status || (data.reused_existing ? "reused existing" : "-");
+      document.getElementById("extracted_candidates").textContent = data.extracted_candidates ?? "-";
       if (data.preview_id) setVal("preview_id", data.preview_id);
       if (data.staged_artifact_id) setVal("staged_artifact_id", data.staged_artifact_id);
       if (data.id) setVal("source_job_id", data.id);
+      if (data.source_job_id) setVal("source_job_id", data.source_job_id);
     };
     const requestJson = async (url, options = {}) => {
       const res = await fetch(url, options);
@@ -299,7 +384,7 @@ INTAKE_CONSOLE_HTML = """
       try { show(await requestJson(`/api/intake/jobs/${val("source_job_id")}/candidates`)); } catch (e) { show({ error: e.message }); }
     };
     document.getElementById("evidence").onclick = async () => {
-      try { show(await requestJson(`/api/intake/jobs/${val("source_job_id")}/evidence`)); } catch (e) { show({ error: e.message }); }
+      try { show(await requestJson(`/api/intake/jobs/${val("source_job_id")}/evidence`), "evidence"); } catch (e) { show({ error: e.message }); }
     };
   </script>
 </body>

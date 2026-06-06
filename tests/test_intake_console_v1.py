@@ -150,6 +150,43 @@ def test_run_uses_saved_fingerprint_and_adapter_not_recomputed(client: TestClien
     assert body["adapter_name"] == preview["adapter_name"]
     assert body["final_source_type"] == preview["final_source_type"]
     assert body["extracted_candidates"] == 1
+    assert body["reused_existing"] is False
+
+
+def test_run_extraction_is_idempotent_and_evidence_counts_match(client: TestClient) -> None:
+    preview = _upload_preview(
+        client,
+        "wallets.csv",
+        (
+            "Entity,Network,Address\n"
+            "Bybit,Ethereum,0x1111111111111111111111111111111111111111\n"
+            "Bybit,BSC,0x2222222222222222222222222222222222222222\n"
+        ).encode(),
+    )
+    job = client.post("/api/intake/jobs", json={"preview_id": preview["preview_id"]}).json()
+
+    first = client.post(f"/api/intake/jobs/{job['id']}/run")
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["extracted_candidates"] == 2
+    assert first_body["reused_existing"] is False
+
+    candidates = client.get(f"/api/intake/jobs/{job['id']}/candidates").json()
+    evidence = client.get(f"/api/intake/jobs/{job['id']}/evidence").json()
+    assert len(candidates) == 2
+    assert len(evidence) == 2
+
+    second = client.post(f"/api/intake/jobs/{job['id']}/run")
+    assert second.status_code == 200, second.text
+    second_body = second.json()
+    assert second_body["extracted_candidates"] == 2
+    assert second_body["reused_existing"] is True
+
+    candidates_after = client.get(f"/api/intake/jobs/{job['id']}/candidates").json()
+    evidence_after = client.get(f"/api/intake/jobs/{job['id']}/evidence").json()
+    assert len(candidates_after) == 2
+    assert len(evidence_after) == 2
+    assert len(evidence_after) == len(candidates_after)
 
 
 def test_xlsx_requested_as_por_pdf_routes_to_excel_adapter(client: TestClient) -> None:
@@ -828,6 +865,11 @@ def test_intake_console_and_input_window_behavior(client: TestClient) -> None:
     assert 'accept=".pdf,.csv,.xlsx,.xls,.txt,.md,.json,.yaml,.yml"' in html
     assert "Candidate preview table" in html
     assert "candidateTableWrap" in html
+    assert "Evidence table" in html
+    assert "evidenceTableWrap" in html
+    assert "No evidence rows found for this source job" in html
+    assert "extracted_candidates" in html
+    assert "reused_existing" in html
     assert "required source_type" not in html.lower()
 
     response = client.get("/input-window", follow_redirects=False)

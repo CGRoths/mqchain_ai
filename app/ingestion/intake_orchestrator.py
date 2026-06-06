@@ -152,12 +152,19 @@ class IntakeOrchestrator:
             created_by=created_by,
         )
 
-    async def run_extraction(self, source_job_id: int) -> tuple[SourceJob, int]:
+    async def run_extraction(self, source_job_id: int) -> tuple[SourceJob, int, bool]:
         job = self.db.get(SourceJob, source_job_id)
         if job is None:
             raise IntakeError("source_job_not_found")
         if not job.final_source_type or not job.adapter_name:
             raise IntakeError("source_job_missing_saved_parser_result")
+        existing_count = self._candidate_count_for_job(job.id)
+        if existing_count:
+            if job.status not in {"needs_review", "extracted"}:
+                job.status = "needs_review"
+                self.db.commit()
+                self.db.refresh(job)
+            return job, existing_count, True
 
         content = await self._content_for_job(job)
         artifact = self._artifact_from_job(job, content)
@@ -193,7 +200,7 @@ class IntakeOrchestrator:
             job.status = "needs_review" if created else "extracted"
             self.db.commit()
             self.db.refresh(job)
-            return job, created
+            return job, created, False
         except Exception:
             self.db.rollback()
             failed = self.db.get(SourceJob, source_job_id)
@@ -207,6 +214,9 @@ class IntakeOrchestrator:
     def candidates_for_job(self, source_job_id: int) -> list[AddressCandidate]:
         stmt = select(AddressCandidate).where(AddressCandidate.source_job_id == source_job_id).order_by(AddressCandidate.id.asc())
         return list(self.db.scalars(stmt))
+
+    def _candidate_count_for_job(self, source_job_id: int) -> int:
+        return len(self.candidates_for_job(source_job_id))
 
     def evidence_for_job(self, source_job_id: int) -> list[AddressEvidence]:
         stmt = (

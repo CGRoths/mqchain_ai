@@ -88,6 +88,7 @@ class RunExtractionResponse(BaseModel):
     status: str
     final_source_type: str
     adapter_name: str
+    reused_existing: bool = False
     fatal_errors: list[str] = Field(default_factory=list)
 
 
