@@ -287,7 +287,7 @@ def test_pdf_network_and_address_headers_on_separate_lines_parse(client: TestCli
     preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
     assert preview["profile"]["metadata"]["network_address_header_found"] is True
     assert preview["profile"]["metadata"]["audited_wallet_rows_detected"] == 1
-    assert preview["profile"]["metadata"]["pdf_parser_mode"] == "hacken_audited_wallet_table"
+    assert preview["profile"]["metadata"]["pdf_parser_mode"] == "hacken_audited_wallet_line_table"
     assert preview["candidates_preview"][0]["address"] == "0x18673311fec54ac2244a602e6d91845553d24e62"
 
 
@@ -417,7 +417,7 @@ def test_pdf_compact_hacken_parser_does_not_parse_footer(client: TestClient) -> 
     assert preview["profile"]["metadata"]["audited_wallet_heading_found"] is True
     assert preview["profile"]["metadata"]["network_address_header_found"] is True
     assert preview["profile"]["metadata"]["audited_wallet_rows_detected"] == 0
-    assert "pdf_audited_wallet_section_found_but_no_rows" in preview["warnings"]
+    assert "pdf_structured_hacken_parser_failed" in preview["warnings"]
 
 
 def test_pdf_compact_hacken_parser_ignores_page_noise_until_collateral_ratios(client: TestClient) -> None:
@@ -474,6 +474,108 @@ def test_pdf_compact_hacken_real_bybit_excerpt_continues_after_page_footers(clie
     assert "Bitcoin" in candidate_networks
     assert "BSC" in candidate_networks
     assert metadata["parser_stop_marker"] == "Collateral ratios"
+
+
+def test_pdf_mexc_hacken_parser_skips_toc_and_selects_real_audited_wallet_section(client: TestClient) -> None:
+    algorand = "A" * 58
+    aptos = "0xe8ca" + "1" * 56 + "cbdc"
+    arbitrum = "0xb86f" + "1" * 36
+    bitcoin = "13uZ" + "A" * 30
+    bsc = "0x2e8" + "2" * 37
+    sample = f"""
+    Proof of Reserves Audit Report MEXC
+    Executive Summary
+    Building Trust
+    Methodology
+    Proof of Reserves Scope & Findings
+    Audited wallets
+    Collateral ratios
+    Team Composition
+    Conclusion
+    Disclaimers
+    References
+    Auditee MEXC
+    Hacken MEXC Proof of Reserves Page 12
+    Audited wallets
+    Network Address
+    Algorand
+    {algorand[:52]}
+    {algorand[52:]}
+    Aptos
+    {aptos[:62]}
+    {aptos[62:]}
+    Arbitrum {arbitrum}
+    Bitcoin {bitcoin}
+    BSC {bsc}
+    Collateral ratios
+    """
+    preview = _upload_preview(client, "MEXC_PoR_Audit_20260510.pdf", sample.encode())
+    metadata = preview["profile"]["metadata"]
+    rows = preview["table_preview"][0]["rows"]
+    assert preview["profile"]["entity_name"] == "MEXC"
+    assert preview["profile"]["category"] == "cex"
+    assert metadata["pdf_parser_mode"] == "hacken_audited_wallet_line_table"
+    assert metadata["parser_stop_marker"] == "Collateral ratios"
+    assert metadata["rejected_audited_wallet_heading_count"] >= 1
+    assert [row["Network"] for row in rows] == ["Algorand", "Aptos", "Arbitrum", "Bitcoin", "BSC"]
+    assert "pdf_loose_text_fallback_used" not in preview["warnings"]
+    assert all(candidate["source_network"] for candidate in preview["candidates_preview"])
+
+
+def test_pdf_kucoin_hacken_line_table_parses_split_networks_and_wrapped_addresses(client: TestClient) -> None:
+    aptos = "0x7cab" + "2" * 56 + "0f22"
+    avalanche = "0x17a303" + "3" * 34
+    bitcoin = "bc1qjxk5" + "a" * 30 + "as8a3dkw"
+    kcc = "0x4c" + "4" * 38
+    noble = "noble1" + "q" * 38
+    ton = "EQ" + "A" * 46
+    xdc = "0x5d" + "5" * 38
+    zklink = "0x6e" + "6" * 38
+    zksync = "0x7f" + "7" * 38
+    sample = f"""
+    Hacken's KuCoin Proof of Reserve
+    Auditee KuCoin
+    Audited Wallets
+    Network
+    Address
+    Aptos
+    {aptos[:62]}
+    {aptos[62:]}
+    Avalanche
+    C-Chain
+    {avalanche}
+    Bitcoin
+    {bitcoin[:30]}
+    {bitcoin[30:]}
+    KCC {kcc}
+    NEAR kucoinc.near
+    Noble {noble}
+    TON {ton}
+    XDC {xdc}
+    zkLink Nova {zklink}
+    zkSync Era {zksync}
+    Collateral Ratios
+    """
+    preview = _upload_preview(client, "KuCoin_PoR_Audit.pdf", sample.encode())
+    metadata = preview["profile"]["metadata"]
+    rows = preview["table_preview"][0]["rows"]
+    by_network = {row["Network"]: row["Address"] for row in rows}
+    assert preview["profile"]["entity_name"] == "KuCoin"
+    assert preview["profile"]["category"] == "cex"
+    assert metadata["pdf_parser_mode"] == "hacken_audited_wallet_line_table"
+    assert metadata["parser_stop_marker"] == "Collateral Ratios"
+    assert by_network["Aptos"] == aptos
+    assert by_network["Avalanche-C"] == avalanche
+    assert by_network["Bitcoin"] == bitcoin
+    assert by_network["KCC"] == kcc
+    assert by_network["Near"] == "kucoinc.near"
+    assert by_network["Noble"] == noble
+    assert by_network["Ton"] == ton
+    assert by_network["XDC"] == xdc
+    assert by_network["zkLink Nova"] == zklink
+    assert by_network["zkSync Era"] == zksync
+    assert metadata["candidate_rows_created"] == metadata["raw_wallet_rows_detected"]
+    assert "pdf_loose_text_fallback_used" not in preview["warnings"]
 
 
 def test_candidate_save_rolls_back_without_context_or_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
