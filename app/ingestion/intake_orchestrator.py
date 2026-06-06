@@ -373,16 +373,16 @@ class IntakeOrchestrator:
         fatal_errors: list[str],
     ) -> IntakeProfile:
         metadata = parsed.metadata
-        entity = next((candidate.entity_name for candidate in candidates if candidate.entity_name), None)
+        entity = metadata.get("entity_name") or next((candidate.entity_name for candidate in candidates if candidate.entity_name), None)
         chain_scope = _dedupe([candidate.chain_slug for candidate in candidates if candidate.chain_slug])
-        expected_roles = _dedupe([candidate.suggested_role for candidate in candidates if candidate.suggested_role])
+        expected_roles = _dedupe([*(metadata.get("expected_roles") or []), *[candidate.suggested_role for candidate in candidates if candidate.suggested_role]])
         return IntakeProfile(
             final_source_type=fingerprint.final_source_type,
             adapter_name=fingerprint.parser_adapter,
             entity_name=entity,
             protocol_name=entity,
-            category="cex" if fingerprint.final_source_type in {"excel_upload", "csv_upload", "por_pdf"} else "unknown",
-            sub_category="reserve_boundary" if fingerprint.final_source_type in {"excel_upload", "csv_upload", "por_pdf"} else None,
+            category=metadata.get("category") or ("cex" if fingerprint.final_source_type in {"excel_upload", "csv_upload", "por_pdf"} else "unknown"),
+            sub_category=metadata.get("sub_category") or ("reserve_boundary" if fingerprint.final_source_type in {"excel_upload", "csv_upload", "por_pdf"} else None),
             expected_roles=expected_roles,
             chain_scope=chain_scope,
             detected_columns=metadata.get("detected_columns", []),

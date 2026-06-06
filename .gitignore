@@ -1,4 +1,7 @@
 .venv/
+.env
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -6,6 +9,7 @@ __pycache__/
 .ruff_cache/
 data/*.db
 data/*.sqlite
+data/test_staged_artifacts/
 data/staged_artifacts/*
 !data/staged_artifacts/.gitkeep
 data/source_uploads/*

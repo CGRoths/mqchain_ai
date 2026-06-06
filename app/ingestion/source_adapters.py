@@ -19,10 +19,67 @@ from app.ingestion.network_normalizer import NetworkNormalizer
 
 
 ADDRESS_RE = re.compile(
-    r"(0x[a-fA-F0-9]{40,128}|bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|T[1-9A-HJ-NP-Za-km-z]{33}|r[1-9A-HJ-NP-Za-km-z]{24,34}|(?:EQ|UQ)[A-Za-z0-9_-]{46})",
+    r"(?<![A-Za-z0-9])(?:0x[a-fA-F0-9]{40,64}|bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|T[1-9A-HJ-NP-Za-km-z]{33}|r[1-9A-HJ-NP-Za-km-z]{24,34}|(?:EQ|UQ)[A-Za-z0-9_-]{46})(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+XRP_RE = re.compile(r"^r[1-9A-HJ-NP-Za-km-z]{24,34}$")
+EVM_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+LONG_0X_RE = re.compile(r"^0x[a-fA-F0-9]{40,64}$")
+BTC_RE = re.compile(r"^(?:bc1[ac-hj-np-z02-9]{11,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$", re.IGNORECASE)
+TRON_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+TON_RE = re.compile(r"^(?:EQ|UQ)[A-Za-z0-9_-]{46}$")
+HACKEN_STOP_MARKERS = {"collateral ratios", "team composition", "conclusion", "disclaimers"}
+HACKEN_NETWORKS = sorted(
+    {
+        "Aptos",
+        "Arbitrum",
+        "Arbitrum Nova",
+        "Arbitrum One",
+        "Avalanche-C",
+        "Avalanche-X",
+        "Base",
+        "Bera",
+        "Bitcoin",
+        "BSC",
+        "Celo",
+        "Codex",
+        "Corn",
+        "Cosmos",
+        "Dogecoin",
+        "DYDX",
+        "Ethereum",
+        "Fantom",
+        "Hedera",
+        "HyperEVM",
+        "Kaia",
+        "Kava EVM",
+        "Linea",
+        "Litecoin",
+        "Manta",
+        "Mantle",
+        "Monad",
+        "Optimism",
+        "Plasma",
+        "Polkadot AH",
+        "Polygon",
+        "Ripple",
+        "XRP Ledger",
+        "Scroll",
+        "Sei EVM",
+        "Solana",
+        "Sonic",
+        "Sui",
+        "Ton",
+        "Tron",
+        "Vaulta",
+        "XDC",
+        "ZKSync Era",
+        "ZKSync Lite",
+    },
+    key=lambda value: len(value.split()),
+    reverse=True,
+)
 CONTROL_SHEET_NAMES = {
     "summary",
     "schema",
@@ -117,11 +174,22 @@ class PdfAdapter(SourceAdapter):
             except Exception:
                 text = raw_content[:16_000].decode("utf-8", errors="ignore")
                 warnings.append("pdf_text_extraction_fallback")
-        table_preview = _por_tables_from_text(text)
-        candidates = _extract_table_candidates(artifact, fingerprint, table_preview, default_source_input_type="pdf_text_fallback")
-        if not candidates:
+        entity_name = _detect_pdf_entity(text)
+        table_preview = _parse_hacken_audited_wallet_rows(text)
+        if table_preview:
+            candidates = _extract_table_candidates(artifact, fingerprint, table_preview, default_source_input_type="pdf_audited_wallet_table")
+            metadata = {
+                "source_input_type": "pdf_audited_wallet_table",
+                "entity_name": entity_name,
+                "category": "cex",
+                "sub_category": "reserve_boundary",
+                "expected_roles": ["cex_por_wallet"],
+                "warnings": warnings,
+            }
+        else:
+            warnings.append("pdf_loose_text_fallback_used")
             candidates = _extract_text_candidates(artifact, fingerprint, text, source_input_type="pdf_text_fallback")
-        metadata = {"source_input_type": "pdf_text_fallback", "warnings": warnings}
+            metadata = {"source_input_type": "pdf_text_fallback", "entity_name": entity_name, "warnings": warnings}
         return _parsed(artifact, fingerprint, document_text=text, document_title=_first_line(text), metadata=metadata, table_preview=table_preview, candidates=candidates, warnings=warnings)
 
 
@@ -297,15 +365,140 @@ def _markdown_tables(text: str) -> list[dict]:
     return tables
 
 
-def _por_tables_from_text(text: str) -> list[dict]:
-    rows = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        match = ADDRESS_RE.search(line)
-        if not match:
+def _parse_hacken_audited_wallet_rows(text: str) -> list[dict]:
+    lines = [(line_number, line.strip()) for line_number, line in enumerate(text.splitlines(), start=1)]
+    start_index = _audited_wallet_section_start(lines)
+    if start_index is None:
+        return []
+
+    entity_name = _detect_pdf_entity(text)
+    rows: list[dict] = []
+    index = start_index
+    while index < len(lines):
+        line_number, line = lines[index]
+        if _is_hacken_stop_line(line):
+            break
+        if not line or _is_footer_only_line(line):
+            index += 1
             continue
-        network = _network_from_line(line)
-        rows.append({"Network": network or "", "Address": match.group(0), "Role": "audited wallet", "_row_number": line_number})
-    return [{"name": "audited_wallets", "headers": ["Network", "Address", "Role"], "rows": rows, "start_line": 1}] if rows else []
+        network_match = _match_known_network_prefix(line)
+        if network_match is None:
+            index += 1
+            continue
+
+        network, remainder = network_match
+        pieces: list[str] = [remainder] if remainder else []
+        index += 1
+        while index < len(lines):
+            _next_number, next_line = lines[index]
+            if _is_hacken_stop_line(next_line) or _match_known_network_prefix(next_line) is not None:
+                break
+            if not next_line or _is_footer_only_line(next_line):
+                index += 1
+                continue
+            if _looks_like_address_continuation(next_line):
+                pieces.append(next_line)
+                index += 1
+                continue
+            break
+
+        address = _address_from_network_pieces(network, pieces)
+        if not address:
+            continue
+        rows.append(
+            {
+                "Entity": entity_name,
+                "Network": network,
+                "Address": address,
+                "Role": "audited wallet",
+                "Evidence Type": "audited_wallet",
+                "Confidence": "85",
+                "_row_number": line_number,
+            }
+        )
+
+    return [
+        {
+            "name": "audited_wallets",
+            "headers": ["Entity", "Network", "Address", "Role", "Evidence Type", "Confidence"],
+            "rows": rows,
+            "start_line": rows[0]["_row_number"] if rows else start_index + 1,
+            "metadata": {"parser": "hacken_audited_wallets"},
+        }
+    ] if rows else []
+
+
+def _audited_wallet_section_start(lines: list[tuple[int, str]]) -> int | None:
+    for index, (_line_number, line) in enumerate(lines):
+        if "audited wallets" not in line.lower():
+            continue
+        for header_index in range(index + 1, min(index + 10, len(lines))):
+            header = re.sub(r"\s+", " ", lines[header_index][1].lower()).strip()
+            if "network" in header and "address" in header:
+                return header_index + 1
+        return index + 1
+    return None
+
+
+def _is_hacken_stop_line(line: str) -> bool:
+    normalized = re.sub(r"\s+", " ", line.strip().lower())
+    return any(marker in normalized for marker in HACKEN_STOP_MARKERS)
+
+
+def _is_footer_only_line(line: str) -> bool:
+    normalized = line.strip()
+    if not normalized:
+        return True
+    if re.fullmatch(r"\d{1,3}", normalized):
+        return True
+    if re.fullmatch(r"page\s+\d+(?:\s+of\s+\d+)?", normalized, flags=re.IGNORECASE):
+        return True
+    return normalized.lower() in {"hacken", "proof of reserves audit report", "bybit proof of reserves audit report"}
+
+
+def _match_known_network_prefix(line: str) -> tuple[str, str] | None:
+    normalized = re.sub(r"\s+", " ", line.strip())
+    for network in HACKEN_NETWORKS:
+        pattern = re.compile(rf"^{re.escape(network)}(?=$|\s|:|-)", flags=re.IGNORECASE)
+        match = pattern.match(normalized)
+        if match:
+            return network, normalized[match.end() :].strip(" :-\t")
+    return None
+
+
+def _looks_like_address_continuation(line: str) -> bool:
+    stripped = re.sub(r"\s+", "", line.strip())
+    if not stripped:
+        return False
+    if _match_known_network_prefix(line) is not None:
+        return False
+    return bool(re.fullmatch(r"[A-Fa-f0-9]{4,64}", stripped) or re.fullmatch(r"[A-Za-z0-9_-]{8,96}", stripped))
+
+
+def _address_from_network_pieces(network: str, pieces: list[str]) -> str | None:
+    compact = "".join(re.sub(r"\s+", "", piece.strip()) for piece in pieces if piece and piece.strip())
+    if not compact:
+        return None
+    normalized_network = NetworkNormalizer.normalize(network)
+    if normalized_network.chain_guess in {"aptos", "sui"}:
+        match = re.search(r"0x[a-fA-F0-9]{40,64}", compact)
+        if match:
+            address = match.group(0)
+            return address if _valid_address_for_network(address, normalized_network) else None
+    if normalized_network.chain_guess == "evm":
+        match = re.search(r"0x[a-fA-F0-9]{40}", compact)
+        if match:
+            address = match.group(0)
+            return address if _valid_address_for_network(address, normalized_network) else None
+    for regex in (BTC_RE, TRON_RE, TON_RE, XRP_RE):
+        for match in regex.finditer(compact):
+            address = match.group(0)
+            if _valid_address_for_network(address, normalized_network):
+                return address
+    match = ADDRESS_RE.search(compact)
+    if match and _valid_address_for_network(match.group(0), normalized_network):
+        return match.group(0)
+    return None
 
 
 def _extract_table_candidates(
@@ -385,11 +578,13 @@ def _extract_text_candidates(
     candidates: list[CandidatePreview] = []
     for line_number, line in enumerate(text.splitlines(), start=1):
         for match in ADDRESS_RE.finditer(line):
+            raw_network = _network_from_line(line)
+            warnings = ["no_source_network_for_text_candidate"] if source_input_type == "pdf_text_fallback" and not raw_network else []
             candidate = _candidate_from_address(
                 artifact,
                 fingerprint,
                 address=match.group(0),
-                raw_network=_network_from_line(line),
+                raw_network=raw_network,
                 role_hint=None,
                 suggested_role=None,
                 source_url=artifact.source_url,
@@ -399,7 +594,7 @@ def _extract_text_candidates(
                 table_name=None,
                 evidence_type="source_extraction_context",
                 source_input_type=source_input_type,
-                raw_reference={"raw_line": line, "line_number": line_number},
+                raw_reference={"raw_line": line, "line_number": line_number, "warnings": warnings},
             )
             if candidate:
                 candidates.append(candidate)
@@ -427,6 +622,8 @@ def _candidate_from_address(
     if not clean:
         return None
     network = NetworkNormalizer.normalize(raw_network)
+    if not _valid_address_for_network(clean, network):
+        return None
     inferred_family = _infer_address_family(clean)
     chain_guess = network.chain_guess or inferred_family
     chain_slug = network.canonical_chain
@@ -517,6 +714,23 @@ def clean_wallet_address(value: str | None) -> str | None:
     if len(cleaned) < 8:
         return None
     return cleaned
+
+
+def _valid_address_for_network(address: str, network) -> bool:
+    chain_guess = network.chain_guess
+    if EVM_RE.fullmatch(address):
+        return chain_guess not in {"aptos", "sui", "xrp", "ton", "tron", "btc", "bitcoin"}
+    if LONG_0X_RE.fullmatch(address):
+        return chain_guess in {"aptos", "sui"}
+    if XRP_RE.fullmatch(address):
+        return chain_guess == "xrp"
+    if BTC_RE.fullmatch(address):
+        return chain_guess in {"btc", "bitcoin", "litecoin", "dogecoin"}
+    if TRON_RE.fullmatch(address):
+        return chain_guess == "tron"
+    if TON_RE.fullmatch(address):
+        return chain_guess == "ton"
+    return False
 
 
 def _suggest_role(role_hint: str | None) -> str | None:
@@ -695,6 +909,14 @@ def _title_from_url(source_url: str | None) -> str | None:
     if not source_url:
         return None
     return Path(urlparse(source_url).path).name or source_url
+
+
+def _detect_pdf_entity(text: str) -> str | None:
+    if re.search(r"\bAuditee\s+Bybit\b", text, flags=re.IGNORECASE):
+        return "Bybit"
+    if re.search(r"\bBYBIT\b", text):
+        return "Bybit"
+    return None
 
 
 def _first_line(text: str) -> str | None:

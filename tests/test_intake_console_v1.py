@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 from io import BytesIO
+from pathlib import Path
+
+os.environ["MQCHAIN_AI_DATABASE_URL"] = "sqlite:///./data/test_mqchain_ai.db"
+os.environ["MQCHAIN_AI_STAGED_ARTIFACT_DIR"] = "./data/test_staged_artifacts"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,10 +22,15 @@ from app.main import app
 
 @pytest.fixture(autouse=True)
 def reset_db() -> None:
+    test_stage = Path("./data/test_staged_artifacts")
+    if test_stage.exists():
+        shutil.rmtree(test_stage)
     Base.metadata.drop_all(bind=engine)
     init_db()
     yield
     Base.metadata.drop_all(bind=engine)
+    if test_stage.exists():
+        shutil.rmtree(test_stage)
 
 
 @pytest.fixture()
@@ -177,6 +188,91 @@ def test_pdf_requested_as_excel_upload_routes_to_pdf_adapter(client: TestClient)
     assert preview["final_source_type"] == "pdf_upload"
     assert preview["adapter_name"] == "pdf_adapter"
     assert preview["override_reason"] == "source_type_overridden_by_artifact_fingerprint"
+
+
+def test_pdf_front_matter_words_do_not_create_fake_candidates(client: TestClient) -> None:
+    sample = """
+    Proof of Reserves Audit Report BYBIT
+    cryptocurrencies Preliminary
+    By implementing Hacken Proof of Reserves, reserves are verifiable.
+    The primary objective of this audit is to provide assurance.
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert preview["final_source_type"] == "pdf_upload"
+    assert preview["adapter_name"] == "pdf_adapter"
+    assert preview["candidates_preview"] == []
+
+
+def test_pdf_audited_wallet_section_extracts_only_real_rows(client: TestClient) -> None:
+    sample = """
+    Proof of Reserves Audit Report BYBIT
+    Report date Fri Apr 24 2026
+    Audit date Wed Apr 22 2026
+    Audited wallets
+    Network Address
+    Aptos 0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e3
+    5d9a1e8
+    Arbitrum 0x18673311fec54ac2244a602e6d91845553d24e62
+    Collateral ratios
+    ryptocurrenciesPreliminary
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    candidates = preview["candidates_preview"]
+    assert len(candidates) == 2
+    assert candidates[0]["source_network"] == "Aptos"
+    assert candidates[0]["address"] == "0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e35d9a1e8"
+    assert candidates[0]["chain_guess"] == "aptos"
+    assert candidates[0]["suggested_role"] == "cex_por_wallet"
+    assert candidates[0]["source_input_type"] == "pdf_audited_wallet_table"
+    assert candidates[0]["evidence_type"] == "audited_wallet"
+    assert candidates[0]["confidence_initial"] == 85
+    assert candidates[1]["source_network"] == "Arbitrum"
+    assert candidates[1]["address"] == "0x18673311fec54ac2244a602e6d91845553d24e62"
+    assert candidates[1]["chain_id"] == 42161
+
+
+def test_pdf_xrp_false_positive_is_rejected(client: TestClient) -> None:
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", b"ryptocurrenciesPreliminary")
+    assert preview["candidates_preview"] == []
+
+
+def test_pdf_ripple_row_requires_network_and_validates(client: TestClient) -> None:
+    sample = """
+    BYBIT
+    Audited wallets
+    Network Address
+    Ripple raBWjPDjohBGc9dR6ti3DsP9Sn47jirTi3
+    Conclusion
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    candidates = preview["candidates_preview"]
+    assert len(candidates) == 1
+    assert candidates[0]["source_network"] == "Ripple"
+    assert candidates[0]["address"] == "raBWjPDjohBGc9dR6ti3DsP9Sn47jirTi3"
+    assert candidates[0]["chain_guess"] == "xrp"
+
+
+def test_pdf_preview_bybit_profile_uses_audited_wallet_metadata(client: TestClient) -> None:
+    sample = """
+    Proof of Reserves Audit Report BYBIT
+    Auditee Bybit
+    Report date Fri Apr 24 2026
+    Audit date Wed Apr 22 2026
+    cryptocurrencies Preliminary
+    Audited wallets
+    Network Address
+    Aptos 0x118db0fecb576630cb1c977efb0de29d3692cafbe8dc88f5289f712e3
+    5d9a1e8
+    Team Composition
+    Reserves By implementing the Hacken approach
+    """
+    preview = _upload_preview(client, "Bybit_PoR_Audit_2026_Apr_22.pdf", sample.encode())
+    assert preview["profile"]["entity_name"] == "Bybit"
+    assert preview["profile"]["category"] == "cex"
+    assert preview["profile"]["sub_category"] == "reserve_boundary"
+    assert "cex_por_wallet" in preview["profile"]["expected_roles"]
+    assert preview["candidates_preview"][0]["source_input_type"] == "pdf_audited_wallet_table"
+    assert all("Preliminary" not in candidate["address"] for candidate in preview["candidates_preview"])
 
 
 def test_candidate_save_rolls_back_without_context_or_evidence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
