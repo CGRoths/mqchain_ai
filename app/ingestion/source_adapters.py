@@ -21,6 +21,7 @@ from app.ingestion.deployment_extractor import (
     table_metadata,
     yaml_deployment_tables,
 )
+from app.ingestion.extraction_pipeline import ExtractionPipeline
 from app.ingestion.github_source_resolver import resolve_github_source
 from app.ingestion.html_table_extractor import extract_html_deployment_tables
 from app.ingestion.intake_models import CandidatePreview, ParsedSource, SourceArtifact, SourceFingerprint
@@ -325,12 +326,22 @@ class SourceAdapter:
 class PlainTextAdapter(SourceAdapter):
     adapter_name = "plain_text_adapter"
 
+    def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
+        if fingerprint.final_source_type in {"markdown", "plain_text", "manual_seed"}:
+            parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content)
+            if parsed is not None:
+                return parsed
+        return super().parse(artifact, fingerprint, raw_content)
+
 
 class JsonYamlAdapter(SourceAdapter):
     adapter_name = "json_yaml_adapter"
 
     def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
         text = _decode(raw_content, fallback=artifact.pasted_text or "")
+        parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content)
+        if parsed is not None:
+            return parsed
         tables = json_deployment_tables(
             text,
             source_url=artifact.source_url,
@@ -366,6 +377,9 @@ class GitHubAdapter(SourceAdapter):
     adapter_name = "github_adapter"
 
     def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
+        parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content)
+        if parsed is not None:
+            return parsed
         text, resolved_url = resolve_github_source(artifact.source_url, raw_content)
         if not text:
             text = artifact.pasted_text or ""
@@ -398,6 +412,9 @@ class WebDocsAdapter(SourceAdapter):
 
     def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
         text = _decode(raw_content, fallback=artifact.pasted_text or "")
+        parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content, legacy_preview_category=True)
+        if parsed is not None:
+            return parsed
         tables = _web_docs_deployment_tables(text, source_url=artifact.source_url, content_type=artifact.content_type)
         warnings: list[str] = []
         if tables:
@@ -418,6 +435,39 @@ class WebDocsAdapter(SourceAdapter):
             candidates=candidates,
             warnings=warnings,
         )
+
+
+def _pipeline_parsed_source(
+    artifact: SourceArtifact,
+    fingerprint: SourceFingerprint,
+    raw_content: bytes,
+    *,
+    legacy_preview_category: bool = False,
+) -> ParsedSource | None:
+    try:
+        result = ExtractionPipeline().run(artifact, fingerprint, raw_content)
+    except Exception:
+        return None
+    if result.fatal_errors or not result.normalized_rows:
+        return None
+    metadata = dict(result.metadata)
+    if legacy_preview_category and metadata.get("entity_name") == "Sablier" and metadata.get("sub_category") == "streaming_payments":
+        metadata["pipeline_category"] = metadata.get("category")
+        metadata["category"] = metadata["sub_category"]
+    first_document = result.source_documents[0] if result.source_documents else None
+    document_text = "\n\n".join(document.text or "" for document in result.source_documents) or _decode(raw_content, fallback=artifact.pasted_text or "")
+    if first_document and first_document.source_url:
+        metadata.setdefault("resolved_source_url", first_document.source_url)
+    return _parsed(
+        artifact,
+        fingerprint,
+        document_text=document_text,
+        document_title=_title_from_url(first_document.source_url if first_document else artifact.source_url),
+        metadata=metadata,
+        table_preview=result.table_preview,
+        candidates=result.candidates_preview,
+        warnings=result.warnings,
+    )
 
 
 class PdfAdapter(SourceAdapter):
