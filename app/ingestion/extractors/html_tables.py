@@ -54,10 +54,13 @@ class _HeadingTableParser(HTMLParser):
         self._current_table: list[list[str]] | None = None
         self._current_row: list[str] | None = None
         self._current_cell: list[str] | None = None
+        self._ignored_tag_depth = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
-        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        if tag in {"script", "style"}:
+            self._ignored_tag_depth += 1
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             self._current_heading_level = int(tag[1])
             self._current_heading = []
         elif tag == "table":
@@ -69,8 +72,10 @@ class _HeadingTableParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
-        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"} and self._current_heading is not None:
-            text = " ".join("".join(self._current_heading).split())
+        if tag in {"script", "style"} and self._ignored_tag_depth:
+            self._ignored_tag_depth -= 1
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"} and self._current_heading is not None:
+            text = _clean_text("".join(self._current_heading))
             if text and self._current_heading_level is not None:
                 level = self._current_heading_level
                 self._heading_by_level = {key: value for key, value in self._heading_by_level.items() if key < level}
@@ -78,7 +83,7 @@ class _HeadingTableParser(HTMLParser):
             self._current_heading = None
             self._current_heading_level = None
         elif tag in {"th", "td"} and self._current_cell is not None and self._current_row is not None:
-            self._current_row.append(" ".join("".join(self._current_cell).split()))
+            self._current_row.append(_clean_text("".join(self._current_cell)))
             self._current_cell = None
         elif tag == "tr" and self._current_row is not None and self._current_table is not None:
             if any(cell.strip() for cell in self._current_row):
@@ -91,6 +96,8 @@ class _HeadingTableParser(HTMLParser):
             self._current_table = None
 
     def handle_data(self, data: str) -> None:
+        if self._ignored_tag_depth:
+            return
         if self._current_cell is not None:
             self._current_cell.append(data)
         elif self._current_heading is not None:
@@ -114,3 +121,8 @@ class _HeadingTableParser(HTMLParser):
             "heading_path": heading_path,
             "section_heading": heading_path[-1] if heading_path else None,
         }
+
+
+def _clean_text(value: str) -> str:
+    cleaned = value.replace("\u200b", "")
+    return " ".join(cleaned.split()).strip()

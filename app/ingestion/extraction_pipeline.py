@@ -47,6 +47,8 @@ class ExtractionPipeline:
             warnings.extend(extractor_warnings)
             extractor_stats[document.source_document_key] = stats
             all_raw_rows.extend(raw_rows)
+            if _static_html_table_not_detected(document, stats, raw_rows):
+                warnings.append("docs_table_not_detected_static_html")
             for raw_row in raw_rows:
                 normalized = self.normalizer.normalize(raw_row, text_sample=document.text or "")
                 if normalized is None:
@@ -84,3 +86,14 @@ def _dedupe(values: list[str | None]) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _static_html_table_not_detected(document, stats: dict[str, dict], raw_rows: list[RawExtractedRow]) -> bool:
+    html_stats = stats.get("html_heading_table_extractor") or {}
+    return (
+        not raw_rows
+        and html_stats.get("supported") is True
+        and html_stats.get("rows_found") == 0
+        and document.source_url is not None
+        and not (document.final_source_type or "").startswith("github")
+    )

@@ -306,7 +306,8 @@ def test_sablier_sectioned_docs_table_uses_heading_as_network(client: TestClient
     candidates = preview["candidates_preview"]
     assert len(candidates) == 3
     assert preview["profile"]["entity_name"] == "Sablier"
-    assert preview["profile"]["category"] == "streaming_payments"
+    assert preview["profile"]["category"] == "yield"
+    assert preview["profile"]["sub_category"] == "streaming_payments"
     assert [candidate["source_network"] for candidate in candidates] == ["Ethereum", "Ethereum", "Abstract"]
     assert {candidate["suggested_role"] for candidate in candidates} == {"protocol_contract", "nft_descriptor"}
 

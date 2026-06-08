@@ -412,7 +412,7 @@ class WebDocsAdapter(SourceAdapter):
 
     def parse(self, artifact: SourceArtifact, fingerprint: SourceFingerprint, raw_content: bytes) -> ParsedSource:
         text = _decode(raw_content, fallback=artifact.pasted_text or "")
-        parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content, legacy_preview_category=True)
+        parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content, return_empty_on_static_html_warning=True)
         if parsed is not None:
             return parsed
         tables = _web_docs_deployment_tables(text, source_url=artifact.source_url, content_type=artifact.content_type)
@@ -442,18 +442,17 @@ def _pipeline_parsed_source(
     fingerprint: SourceFingerprint,
     raw_content: bytes,
     *,
-    legacy_preview_category: bool = False,
+    return_empty_on_static_html_warning: bool = False,
 ) -> ParsedSource | None:
     try:
         result = ExtractionPipeline().run(artifact, fingerprint, raw_content)
     except Exception:
         return None
-    if result.fatal_errors or not result.normalized_rows:
+    if result.fatal_errors:
+        return None
+    if not result.normalized_rows and not (return_empty_on_static_html_warning and "docs_table_not_detected_static_html" in result.warnings):
         return None
     metadata = dict(result.metadata)
-    if legacy_preview_category and metadata.get("entity_name") == "Sablier" and metadata.get("sub_category") == "streaming_payments":
-        metadata["pipeline_category"] = metadata.get("category")
-        metadata["category"] = metadata["sub_category"]
     first_document = result.source_documents[0] if result.source_documents else None
     document_text = "\n\n".join(document.text or "" for document in result.source_documents) or _decode(raw_content, fallback=artifact.pasted_text or "")
     if first_document and first_document.source_url:

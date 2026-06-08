@@ -67,6 +67,9 @@ class ExtractionNormalizer:
         confidence_initial = _confidence_initial(
             network=network_label,
             role=role,
+            contract_name=contract_name,
+            source_input_type=raw_row.source_input_type,
+            evidence_type=raw_row.evidence_type,
             confidence_parser=confidence_parser,
         )
         warnings = list(raw_row.warnings)
@@ -85,10 +88,13 @@ class ExtractionNormalizer:
             "source_document_key": raw_row.source_document_key,
             "line_number": raw_row.line_number,
             "row_number": raw_row.row_number,
+            "table_name": raw_row.table_name,
             "json_path": raw_row.json_path,
             "column_name": raw_row.column_name,
             "raw_key": raw_row.raw_key,
             "raw_value": _json_safe(raw_row.raw_value),
+            "deployment": _raw_get(raw_row.raw_row, "Deployment"),
+            "deployment_version": _raw_get(raw_row.raw_row, "Deployment Version", "Deployment"),
             "contract_name": contract_name,
             "role_source": raw_row.extracted_role_hint or raw_row.raw_key or raw_row.column_name or contract_name,
             "confidence_source": raw_row.confidence_source or profile.default_confidence_source,
@@ -125,18 +131,78 @@ class ExtractionNormalizer:
         )
 
     def _infer_network(self, raw_row: RawExtractedRow) -> str | None:
-        for value in (
-            raw_row.extracted_network,
-            _raw_get(raw_row.raw_row, "Network", "Chain", "Blockchain"),
-            raw_row.section_heading,
-            *reversed(raw_row.heading_path),
-            _network_from_path(raw_row.source_file_path),
-            _network_from_path(urlparse(raw_row.source_url or "").path),
-        ):
-            label = normalize_network_label(value)
+        explicit_network = _known_or_clean_network_label(raw_row.extracted_network) or _known_or_clean_network_label(
+            _raw_get(raw_row.raw_row, "Network", "Chain", "Blockchain")
+        )
+        if explicit_network:
+            return explicit_network
+        for value in (raw_row.section_heading, *reversed(raw_row.heading_path)):
+            label = _known_network_heading(value)
+            if label:
+                return label
+        for value in (_network_from_path(raw_row.source_file_path), _network_from_path(urlparse(raw_row.source_url or "").path)):
+            label = _known_network_heading(value)
             if label:
                 return label
         return None
+
+
+NETWORK_HEADING_ALIASES = {
+    "abstract": "Abstract",
+    "arbitrum": "Arbitrum",
+    "avalanche": "Avalanche-C",
+    "avalanche c": "Avalanche-C",
+    "avalanche c chain": "Avalanche-C",
+    "avalanche c-chain": "Avalanche-C",
+    "base": "Base",
+    "bnb": "BNB Chain",
+    "bnb chain": "BNB Chain",
+    "bsc": "BSC",
+    "binance smart chain": "BNB Chain",
+    "ethereum": "Ethereum",
+    "ethereum mainnet": "Ethereum",
+    "mainnet": "Ethereum",
+    "optimism": "Optimism",
+    "polygon": "Polygon",
+    "scroll": "Scroll",
+    "sonic": "Sonic",
+    "unichain": "Unichain",
+    "xdc": "XDC",
+    "zksync era": "ZKSync Era",
+    "zk sync era": "ZKSync Era",
+    "blast": "Blast",
+    "linea": "Linea",
+    "mantle": "Mantle",
+}
+
+
+def _known_or_clean_network_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    known = _known_network_heading(value)
+    if known:
+        return known
+    return normalize_network_label(value)
+
+
+def _known_network_heading(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = _clean_network_text(value)
+    key = cleaned.lower().replace("-", " ")
+    if key in NETWORK_HEADING_ALIASES:
+        return NETWORK_HEADING_ALIASES[key]
+    if NetworkNormalizer.normalize(cleaned).canonical_chain:
+        return cleaned
+    return None
+
+
+def _clean_network_text(value: str) -> str:
+    cleaned = str(value).replace("\u200b", "")
+    cleaned = re.sub(r"[_/]+", " ", cleaned).strip()
+    cleaned = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def _network_from_path(value: str | None) -> str | None:
@@ -195,7 +261,20 @@ def _parser_confidence(extractor_name: str) -> int:
     return 60
 
 
-def _confidence_initial(*, network: str | None, role: str | None, confidence_parser: int) -> int:
+def _confidence_initial(
+    *,
+    network: str | None,
+    role: str | None,
+    contract_name: str | None,
+    source_input_type: str,
+    evidence_type: str,
+    confidence_parser: int,
+) -> int:
+    if evidence_type == "official_docs_deployment" and source_input_type == "docs_html_deployment_table":
+        if network and contract_name:
+            return 90
+        if contract_name:
+            return 75
     score = confidence_parser
     if network:
         score += 5
