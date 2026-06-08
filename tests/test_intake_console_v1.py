@@ -350,6 +350,117 @@ def test_aave_github_solidity_constants_preview_save_run_evidence(client: TestCl
     assert {item["payload"]["raw_reference"]["contract_name"] for item in evidence} == {"POOL_ADDRESSES_PROVIDER", "AAVE_ORACLE"}
 
 
+def test_github_blob_prefetch_failure_still_extracts(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = """
+    pragma solidity ^0.8.0;
+    address internal constant RISK_STEWARD = 0x1111111111111111111111111111111111111111;
+    """
+
+    async def failing_prefetch(url: str):
+        raise RuntimeError("generic prefetch failed")
+
+    monkeypatch.setattr("app.ingestion.intake_orchestrator.fetch_url_bytes", failing_prefetch)
+    monkeypatch.setattr(
+        "app.ingestion.github_source_resolver.httpx.Client",
+        lambda *args, **kwargs: _FakeGitHubClient(
+            {
+                "https://raw.githubusercontent.com/aave-dao/aave-address-book/main/src/AaveV3Ethereum.sol": _FakeGitHubResponse(
+                    content=source.encode()
+                )
+            }
+        ),
+    )
+
+    response = client.post(
+        "/api/intake/preview",
+        json={"input_method": "github", "source_url": "https://github.com/aave-dao/aave-address-book/blob/main/src/AaveV3Ethereum.sol"},
+    )
+
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert preview["fatal_errors"] == []
+    assert "github_prefetch_failed" in preview["warnings"]
+    assert preview["final_source_type"] == "github_blob"
+    assert preview["adapter_name"] == "github_adapter"
+    assert preview["profile"]["entity_name"] == "Aave"
+    assert preview["candidates_preview"]
+    assert preview["candidates_preview"][0]["suggested_role"] == "risk_steward"
+
+
+def test_github_directory_prefetch_failure_still_crawls(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing_prefetch(url: str):
+        raise RuntimeError("generic prefetch failed")
+
+    responses = _compound_root_responses({"base": ["usdc"], "mainnet": ["usdc"]})
+    monkeypatch.setattr("app.ingestion.intake_orchestrator.fetch_url_bytes", failing_prefetch)
+    monkeypatch.setattr("app.ingestion.github_source_resolver.httpx.Client", lambda *args, **kwargs: _FakeGitHubClient(responses))
+
+    response = client.post(
+        "/api/intake/preview",
+        json={"input_method": "github", "source_url": "https://github.com/compound-finance/comet/tree/main/deployments"},
+    )
+
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert preview["fatal_errors"] == []
+    assert "github_prefetch_failed" in preview["warnings"]
+    assert preview["final_source_type"] == "github_directory"
+    assert preview["adapter_name"] == "github_adapter"
+    assert preview["profile"]["metadata"]["root_deployment_scan_mode"] is True
+    assert preview["profile"]["metadata"]["document_count"] == 2
+    assert {candidate["source_network"] for candidate in preview["candidates_preview"]} == {"Base", "Ethereum"}
+
+
+def test_non_github_prefetch_failure_remains_fatal(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing_prefetch(url: str):
+        raise RuntimeError("generic prefetch failed")
+
+    monkeypatch.setattr("app.ingestion.intake_orchestrator.fetch_url_bytes", failing_prefetch)
+
+    response = client.post(
+        "/api/intake/preview",
+        json={"input_method": "url", "source_url": "https://docs.sablier.com/guides/lockup/deployments"},
+    )
+
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert "source_url_unreachable" in preview["fatal_errors"]
+    assert "github_prefetch_failed" not in preview["warnings"]
+
+
+def test_github_directory_prefetch_failure_preserves_rate_limit_warning(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing_prefetch(url: str):
+        raise RuntimeError("generic prefetch failed")
+
+    root_api = "https://api.github.com/repos/compound-finance/comet/contents/deployments?ref=main"
+    monkeypatch.setattr("app.ingestion.intake_orchestrator.fetch_url_bytes", failing_prefetch)
+    monkeypatch.setattr(
+        "app.ingestion.github_source_resolver.httpx.Client",
+        lambda *args, **kwargs: _FakeGitHubClient(
+            {
+                root_api: _FakeGitHubResponse(
+                    status_code=403,
+                    text="rate limit",
+                    headers={"x-ratelimit-limit": "60", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "123"},
+                )
+            }
+        ),
+    )
+
+    response = client.post(
+        "/api/intake/preview",
+        json={"input_method": "github", "source_url": "https://github.com/compound-finance/comet/tree/main/deployments"},
+    )
+
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert preview["fatal_errors"] == []
+    assert "source_url_unreachable" not in preview["fatal_errors"]
+    assert "github_prefetch_failed" in preview["warnings"]
+    assert "github_directory_rate_limited" in preview["warnings"]
+    assert preview["profile"]["metadata"]["fetch_failures"][0]["status_code"] == 403
+
+
 def test_generic_solidity_router_role_inference() -> None:
     tables = extract_solidity_deployment_table(
         "address public constant ROUTER = 0x3333333333333333333333333333333333333333;",
@@ -1018,3 +1129,82 @@ def test_intake_console_and_input_window_behavior(client: TestClient) -> None:
     response = client.get("/input-window", follow_redirects=False)
     assert response.status_code in {307, 308}
     assert response.headers["location"] == "/intake-console"
+
+
+class _FakeGitHubClient:
+    def __init__(self, responses: dict[str, "_FakeGitHubResponse"]) -> None:
+        self.responses = responses
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def get(self, url: str, headers: dict | None = None):
+        key = url if url in self.responses else url.replace("https://raw.example/", "download:")
+        response = self.responses[key]
+        response.url = url
+        return response
+
+
+class _FakeGitHubResponse:
+    def __init__(
+        self,
+        *,
+        json_data=None,
+        content: bytes = b"",
+        status_code: int = 200,
+        text: str | None = None,
+        headers: dict | None = None,
+    ) -> None:
+        self._json_data = json_data
+        self.content = content
+        self.status_code = status_code
+        self.text = text if text is not None else content.decode("utf-8", errors="replace")
+        self.headers = headers or {}
+        self.url = ""
+
+    def json(self):
+        return self._json_data
+
+
+def _compound_root_responses(network_markets: dict[str, list[str]]) -> dict[str, _FakeGitHubResponse]:
+    responses: dict[str, _FakeGitHubResponse] = {}
+    root_api = "https://api.github.com/repos/compound-finance/comet/contents/deployments?ref=main"
+    responses[root_api] = _FakeGitHubResponse(json_data=[_compound_dir(f"deployments/{network}") for network in network_markets])
+    counter = 1
+    for network, markets in network_markets.items():
+        network_path = f"deployments/{network}"
+        responses[f"https://api.github.com/repos/compound-finance/comet/contents/{network_path}?ref=main"] = _FakeGitHubResponse(
+            json_data=[_compound_dir(f"{network_path}/{market}") for market in markets]
+        )
+        for market in markets:
+            market_path = f"{network_path}/{market}"
+            responses[f"https://api.github.com/repos/compound-finance/comet/contents/{market_path}?ref=main"] = _FakeGitHubResponse(
+                json_data=[_compound_file(f"{market_path}/configuration.json")]
+            )
+            address = f"0x{counter:040x}".encode()
+            responses[f"download:{market_path}/configuration.json"] = _FakeGitHubResponse(content=b'{"comet":"' + address + b'"}')
+            counter += 1
+    return responses
+
+
+def _compound_dir(path: str) -> dict:
+    return {
+        "type": "dir",
+        "name": path.rsplit("/", 1)[-1],
+        "path": path,
+        "url": f"https://api.github.com/repos/compound-finance/comet/contents/{path}?ref=main",
+    }
+
+
+def _compound_file(path: str) -> dict:
+    return {
+        "type": "file",
+        "name": path.rsplit("/", 1)[-1],
+        "path": path,
+        "size": 64,
+        "url": f"https://api.github.com/repos/compound-finance/comet/contents/{path}?ref=main",
+        "download_url": f"https://raw.example/{path}",
+    }

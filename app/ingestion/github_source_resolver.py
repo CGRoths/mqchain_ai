@@ -86,6 +86,22 @@ def github_blob_to_raw_url(source_url: str | None) -> str | None:
     return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{'/'.join(path_parts)}"
 
 
+def parse_github_blob_url(source_url: str | None) -> tuple[str, str, str, str] | None:
+    if not source_url:
+        return None
+    parsed = urlparse(source_url)
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if parsed.netloc.lower() == "raw.githubusercontent.com" and len(parts) >= 4:
+        owner, repo, ref, *path_parts = parts
+        return owner, repo, ref, "/".join(path_parts)
+    if parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+        return None
+    if len(parts) < 5 or parts[2] != "blob":
+        return None
+    owner, repo, _blob, ref, *path_parts = parts
+    return owner, repo, ref, "/".join(path_parts)
+
+
 def parse_github_tree_url(source_url: str | None) -> GitHubTreeUrl | None:
     if not source_url:
         return None
@@ -119,11 +135,41 @@ def resolve_github_source(source_url: str | None, raw_content: bytes) -> tuple[s
         return text, resolved_url
     try:
         with httpx.Client(timeout=settings.source_fetch_timeout_seconds, follow_redirects=True) as client:
-            response = client.get(resolved_url)
-            response.raise_for_status()
-            return _decode(response.content), str(response.url)
+            response = client.get(resolved_url, headers=_github_headers())
+            if getattr(response, "status_code", 200) < 400:
+                return _decode(response.content), str(response.url)
+            api_text = _fetch_github_blob_via_contents_api(client, source_url)
+            if api_text:
+                return api_text, resolved_url
     except Exception:
-        return text, resolved_url
+        pass
+    try:
+        with httpx.Client(timeout=settings.source_fetch_timeout_seconds, follow_redirects=True) as client:
+            api_text = _fetch_github_blob_via_contents_api(client, source_url)
+            if api_text:
+                return api_text, resolved_url
+    except Exception:
+        pass
+    return text, resolved_url
+
+
+def _fetch_github_blob_via_contents_api(client: httpx.Client, source_url: str | None) -> str:
+    parsed = parse_github_blob_url(source_url)
+    if parsed is None:
+        return ""
+    owner, repo, ref, path = parsed
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}"
+    response = client.get(api_url, headers=_github_headers())
+    if getattr(response, "status_code", 200) >= 400:
+        return ""
+    payload = response.json()
+    encoded = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(encoded, str):
+        return ""
+    try:
+        return base64.b64decode(encoded).decode("utf-8-sig", errors="replace")
+    except Exception:
+        return ""
 
 
 def _decode(content: bytes) -> str:

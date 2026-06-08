@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -47,12 +48,16 @@ class IntakeOrchestrator:
         raw_content = (pasted_text or "").encode("utf-8")
         final_url = source_url
         fetch_errors: list[str] = []
+        warnings: list[str] = []
         if source_url:
             try:
                 raw_content, final_url, fetched_type = await fetch_url_bytes(source_url)
                 content_type = fetched_type or content_type
             except Exception:
-                fetch_errors.append("source_url_unreachable")
+                if _is_github_structured_url(source_url):
+                    warnings.append("github_prefetch_failed")
+                else:
+                    fetch_errors.append("source_url_unreachable")
                 raw_content = b""
         artifact = SourceArtifact(
             input_method=input_method,
@@ -65,7 +70,13 @@ class IntakeOrchestrator:
             requested_source_type=requested_source_type,
             created_by=created_by,
         )
-        preview = self._build_preview(artifact, raw_content, staged_artifact_id=None, extra_fatal_errors=fetch_errors)
+        preview = self._build_preview(
+            artifact,
+            raw_content,
+            staged_artifact_id=None,
+            extra_warnings=warnings,
+            extra_fatal_errors=fetch_errors,
+        )
         self._persist_preview(preview)
         return preview.to_response()
 
@@ -237,12 +248,13 @@ class IntakeOrchestrator:
         raw_content: bytes,
         *,
         staged_artifact_id: str | None,
+        extra_warnings: list[str] | None = None,
         extra_fatal_errors: list[str] | None = None,
     ) -> IntakePreview:
         preview_id = str(uuid4())
         fingerprint = SourceFingerprintService.fingerprint(artifact, raw_content)
         fatal_errors = [*fingerprint.fatal_errors, *(extra_fatal_errors or [])]
-        warnings = list(fingerprint.warnings)
+        warnings = [*fingerprint.warnings, *(extra_warnings or [])]
         table_preview: list[dict] = []
         candidates: list[CandidatePreview] = []
         evidence_preview: list[dict] = []
@@ -499,6 +511,19 @@ class IntakeOrchestrator:
 def _safe_filename(value: str) -> str:
     name = Path(value).name or "source-upload"
     return re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "source-upload"
+
+
+def _is_github_structured_url(source_url: str | None) -> bool:
+    if not source_url:
+        return False
+    parsed = urlparse(source_url)
+    host = parsed.netloc.lower()
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if host == "raw.githubusercontent.com":
+        return len(parts) >= 4
+    if host not in {"github.com", "www.github.com"}:
+        return False
+    return len(parts) >= 5 and parts[2] in {"blob", "tree"}
 
 
 def _dedupe(values: list[str | None]) -> list[str]:
