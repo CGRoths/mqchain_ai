@@ -50,6 +50,7 @@ class ExtractionPipeline:
             if _static_html_table_not_detected(document, stats, raw_rows):
                 warnings.append("docs_table_not_detected_static_html")
             for raw_row in raw_rows:
+                _enrich_raw_row_from_document(raw_row, document)
                 normalized = self.normalizer.normalize(raw_row, text_sample=document.text or "")
                 if normalized is None:
                     continue
@@ -105,6 +106,24 @@ def _dedupe_normalized_rows(rows: list[NormalizedExtractedRow]) -> list[Normaliz
         seen.add(key)
         result.append(row)
     return result
+
+
+def _enrich_raw_row_from_document(raw_row: RawExtractedRow, document) -> None:
+    metadata = document.metadata or {}
+    if raw_row.extracted_network is None and metadata.get("inferred_network"):
+        raw_row.extracted_network = str(metadata["inferred_network"])
+    for target, source in (
+        ("market", "inferred_market"),
+        ("github_owner", "owner"),
+        ("github_repo", "repo"),
+        ("github_branch", "branch"),
+        ("github_directory_path", "directory_path"),
+        ("github_api_url", "github_api_url"),
+        ("crawler_depth", "crawler_depth"),
+    ):
+        value = metadata.get(source)
+        if value not in {None, ""}:
+            raw_row.raw_row.setdefault(target, value)
 
 
 def _static_html_table_not_detected(document, stats: dict[str, dict], raw_rows: list[RawExtractedRow]) -> bool:

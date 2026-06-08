@@ -127,6 +127,7 @@ def _default_profiles() -> list[ProtocolProfile]:
             role_keywords={
                 "configurator": "protocol_configurator",
                 "governor/admin": "governance_contract",
+                "bridgereceiver/bridge_receiver": "bridge_receiver",
                 "pricefeed/price_feed/oracle": "oracle",
                 "basetoken/ctoken/token": "token_contract",
                 "rewards": "rewards_contract",

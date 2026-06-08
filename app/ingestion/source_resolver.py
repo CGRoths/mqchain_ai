@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
 from app.ingestion.extraction_models import SourceDocument
-from app.ingestion.github_source_resolver import github_blob_to_raw_url, resolve_github_source
+from app.ingestion.github_source_resolver import github_blob_to_raw_url, resolve_github_directory, resolve_github_source
 from app.ingestion.intake_models import SourceArtifact, SourceFingerprint
 
 
@@ -30,8 +31,11 @@ class SourceResolver:
         text = _decode(raw_content, fallback=artifact.pasted_text or "")
         content = raw_content
 
-        if fingerprint.final_source_type == "github_directory":
-            warnings.append("github_directory_crawler_not_enabled")
+        if fingerprint.final_source_type == "github_directory" and not _github_directory_raw_file_input(artifact.source_url, text):
+            directory = resolve_github_directory(artifact.source_url)
+            if directory is not None:
+                return _resolved_github_directory(artifact, fingerprint, directory)
+            warnings.append("github_directory_fetch_failed")
 
         if fingerprint.final_source_type in {"github_blob", "github_raw", "official_github", "github_directory"}:
             resolved_text, resolved_url = resolve_github_source(artifact.source_url, raw_content)
@@ -105,3 +109,116 @@ def _source_document_key(source_url: str | None, source_file_path: str | None, c
     if source_url or source_file_path:
         return f"{source_url or ''}#{source_file_path or ''}"
     return f"content:{content_hash}"
+
+
+def _resolved_github_directory(artifact: SourceArtifact, fingerprint: SourceFingerprint, directory) -> ResolvedSourceSet:
+    documents: list[SourceDocument] = []
+    inferred_network, inferred_market = _infer_network_market_from_path(directory.tree.path)
+    for fetched in directory.files:
+        content_hash = hashlib.sha256(fetched.content).hexdigest()
+        document = SourceDocument(
+            source_document_key=_github_directory_document_key(
+                directory.tree.owner,
+                directory.tree.repo,
+                directory.tree.branch,
+                fetched.path,
+                content_hash,
+            ),
+            document_id=None,
+            source_url=directory.tree.original_url,
+            source_file_path=fetched.path,
+            filename=fetched.name,
+            content_type=fetched.content_type,
+            final_source_type=fingerprint.final_source_type,
+            adapter_name=fingerprint.parser_adapter,
+            text=_decode(fetched.content),
+            raw_bytes=fetched.content,
+            content_hash=content_hash,
+            metadata={
+                "input_method": artifact.input_method,
+                "requested_source_type": artifact.requested_source_type,
+                "final_source_type": fingerprint.final_source_type,
+                "adapter_name": fingerprint.parser_adapter,
+                "owner": directory.tree.owner,
+                "repo": directory.tree.repo,
+                "branch": directory.tree.branch,
+                "directory_path": directory.tree.path,
+                "original_tree_url": directory.tree.original_url,
+                "github_api_url": fetched.api_url,
+                "crawler_depth": fetched.depth,
+                "inferred_network": inferred_network,
+                "inferred_market": inferred_market,
+            },
+        )
+        documents.append(document)
+    return ResolvedSourceSet(
+        documents=documents,
+        warnings=list(directory.warnings),
+        metadata={
+            "resolver_name": "github_directory_resolver",
+            "document_count": len(documents),
+            "resolved_source_url": directory.tree.original_url,
+            "source_file_path": directory.tree.path,
+            "github_owner": directory.tree.owner,
+            "github_repo": directory.tree.repo,
+            "github_branch": directory.tree.branch,
+            "github_directory_path": directory.tree.path,
+            "github_api_urls": directory.api_urls,
+            "inferred_network": inferred_network,
+            "inferred_market": inferred_market,
+        },
+    )
+
+
+def _github_directory_document_key(owner: str, repo: str, branch: str, path: str, content_hash: str) -> str:
+    return f"github:{owner}/{repo}@{branch}:{path}#{content_hash}"
+
+
+def _infer_network_market_from_path(path: str | None) -> tuple[str | None, str | None]:
+    if not path:
+        return None, None
+    parts = [part for part in path.replace("\\", "/").split("/") if part]
+    lowered = [part.lower() for part in parts]
+    for marker in ("deployments", "addresses", "networks"):
+        if marker in lowered:
+            index = lowered.index(marker)
+            network = _network_label(parts[index + 1]) if index + 1 < len(parts) else None
+            market = _market_label(parts[index + 2]) if marker == "deployments" and index + 2 < len(parts) else None
+            return network, market
+    return None, None
+
+
+def _network_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    aliases = {
+        "base": "Base",
+        "mainnet": "Ethereum",
+        "ethereum": "Ethereum",
+        "arbitrum": "Arbitrum",
+        "polygon": "Polygon",
+        "optimism": "Optimism",
+    }
+    key = value.strip().lower()
+    return aliases.get(key) or _title_token(value)
+
+
+def _market_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    token = Path(value).stem
+    return token.upper() if re.fullmatch(r"[A-Za-z0-9]{2,12}", token) else _title_token(token)
+
+
+def _title_token(value: str) -> str:
+    return re.sub(r"[-_]+", " ", value).strip().title()
+
+
+def _github_directory_raw_file_input(source_url: str | None, text: str) -> bool:
+    if not source_url:
+        return False
+    path = urlparse(source_url).path.lower()
+    if not Path(path).suffix.lower() in {".json", ".yaml", ".yml", ".ts", ".js", ".sol", ".md"}:
+        return False
+    sample = text[:4096].lower()
+    return bool(text.strip()) and not (("<html" in sample or "<!doctype html" in sample) and "github" in sample)

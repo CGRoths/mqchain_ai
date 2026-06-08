@@ -11,7 +11,7 @@ CONST_ADDRESS_RE = re.compile(
     r"(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*[\"'](?P<address>0x[a-fA-F0-9]{40})[\"']",
 )
 KEY_ADDRESS_RE = re.compile(
-    r"(?P<key>[A-Za-z_$][A-Za-z0-9_$-]*)\s*:\s*[\"'](?P<address>0x[a-fA-F0-9]{40})[\"']",
+    r"[\"']?(?P<key>[A-Za-z_$][A-Za-z0-9_$-]*)[\"']?\s*:\s*[\"'](?P<address>0x[a-fA-F0-9]{40})[\"']",
 )
 
 
@@ -35,6 +35,8 @@ class TypeScriptJavascriptAddressExtractor(ExtractorPlugin):
                 name = match.group("name") if "name" in match.groupdict() else match.group("key")
                 address = match.group("address")
                 line_number = text.count("\n", 0, match.start()) + 1
+                if name.lower() in {"address", "contractaddress"}:
+                    name = _object_context_name(text, match.start()) or name
                 key = (name, address.lower(), line_number)
                 if key in seen:
                     continue
@@ -65,3 +67,12 @@ def _source_line(text: str, line_number: int) -> str | None:
     if 1 <= line_number <= len(lines):
         return lines[line_number - 1].strip()
     return None
+
+
+def _object_context_name(text: str, index: int) -> str | None:
+    prefix = text[max(0, index - 512) : index]
+    matches = list(re.finditer(r"[\"']?(?P<key>[A-Za-z_$][A-Za-z0-9_$-]*)[\"']?\s*:\s*\{", prefix))
+    if not matches:
+        return None
+    key = matches[-1].group("key")
+    return None if key.lower() in {"contracts", "addresses", "deployments"} else key

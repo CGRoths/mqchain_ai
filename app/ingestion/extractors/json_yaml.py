@@ -49,7 +49,7 @@ class JsonYamlAddressExtractor(ExtractorPlugin):
         for path, value in _walk_json(data):
             if isinstance(value, str):
                 for address in ADDRESS_RE.findall(value):
-                    raw_key = path[-1] if path else None
+                    raw_key = _contract_key_from_path(path)
                     rows.append(
                         RawExtractedRow(
                             extractor_name=self.name,
@@ -121,3 +121,16 @@ def _walk_json(value: Any, path: list[str] | None = None):
     elif isinstance(value, list):
         for index, item in enumerate(value):
             yield from _walk_json(item, [*path, str(index)])
+
+
+def _contract_key_from_path(path: list[str]) -> str | None:
+    if not path:
+        return None
+    generic_leaf_keys = {"address", "contract_address", "proxy", "implementation"}
+    leaf = path[-1]
+    if leaf.lower() not in generic_leaf_keys:
+        return leaf
+    for part in reversed(path[:-1]):
+        if not part.isdigit() and part.lower() not in {"contracts", "addresses", "deployments"}:
+            return part
+    return leaf

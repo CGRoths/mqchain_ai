@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     source_upload_max_bytes: int = 25_000_000
     source_fetch_timeout_seconds: int = 10
     source_fetch_max_bytes: int = 10_000_000
+    github_crawl_max_depth: int = 3
+    github_crawl_max_files: int = 100
+    github_crawl_max_bytes_per_file: int = 1_000_000
     preview_candidate_limit: int = 100
     max_extraction_candidates_per_job: int = 10_000
     pdf_max_pages: int | None = 50
