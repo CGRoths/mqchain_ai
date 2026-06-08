@@ -4,7 +4,7 @@ import json
 
 from app.core.config import settings
 from app.ingestion.extraction_pipeline import ExtractionPipeline
-from app.ingestion.github_source_resolver import parse_github_tree_url
+from app.ingestion.github_source_resolver import _github_headers, parse_github_tree_url
 from app.ingestion.intake_models import SourceArtifact, SourceFingerprint
 from app.ingestion.source_resolver import SourceResolver, _infer_network_market_from_path
 
@@ -70,10 +70,15 @@ def test_github_directory_resolver_fetches_supported_files_and_skips_unsupported
             "ignored.png": b"png",
         }
     )
-    monkeypatch.setattr("app.ingestion.github_source_resolver.httpx.Client", lambda *args, **kwargs: _FakeClient(responses))
+    fake_client = _FakeClient(responses)
+    monkeypatch.setattr("app.ingestion.github_source_resolver.httpx.Client", lambda *args, **kwargs: fake_client)
 
     resolved = SourceResolver().resolve(_artifact(), _fingerprint(), b"<html>github</html>")
 
+    assert fake_client.requests
+    assert all(request["headers"]["User-Agent"] == "mqchain-ai" for request in fake_client.requests)
+    assert all(request["headers"]["Accept"] == "application/vnd.github+json" for request in fake_client.requests)
+    assert all(request["headers"]["X-GitHub-Api-Version"] == "2022-11-28" for request in fake_client.requests)
     assert resolved.fatal_errors == []
     assert "github_directory_unsupported_file_skipped" in resolved.warnings
     assert [document.source_file_path for document in resolved.documents] == [
@@ -194,6 +199,60 @@ def test_github_directory_no_supported_files_warns_without_crashing(monkeypatch)
     assert "github_directory_unsupported_file_skipped" in resolved.warnings
 
 
+def test_github_headers_include_optional_token(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "github_api_token", None)
+    monkeypatch.setenv("MQCHAIN_GITHUB_API_TOKEN", "test-token")
+
+    headers = _github_headers()
+
+    assert headers["Authorization"] == "Bearer test-token"
+
+
+def test_github_directory_rate_limit_failure_records_diagnostics(monkeypatch) -> None:
+    root_api = "https://api.github.com/repos/compound-finance/comet/contents/deployments?ref=main"
+    responses = {
+        root_api: _FakeResponse(
+            status_code=403,
+            text="rate limit exceeded",
+            headers={"x-ratelimit-limit": "60", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "123"},
+        )
+    }
+    monkeypatch.setattr("app.ingestion.github_source_resolver.httpx.Client", lambda *args, **kwargs: _FakeClient(responses))
+
+    result = ExtractionPipeline().run(_root_artifact(), _fingerprint(), b"<html>github</html>")
+
+    assert "github_directory_rate_limited" in result.warnings
+    failure = result.metadata["fetch_failures"][0]
+    assert failure["status_code"] == 403
+    assert failure["response_text"] == "rate limit exceeded"
+    assert failure["x_ratelimit_remaining"] == "0"
+    assert result.metadata["github_rate_limit_remaining"] == "0"
+
+
+def test_github_directory_not_found_failure_records_diagnostics(monkeypatch) -> None:
+    root_api = "https://api.github.com/repos/compound-finance/comet/contents/deployments?ref=main"
+    responses = {root_api: _FakeResponse(status_code=404, text="not found")}
+    monkeypatch.setattr("app.ingestion.github_source_resolver.httpx.Client", lambda *args, **kwargs: _FakeClient(responses))
+
+    result = ExtractionPipeline().run(_root_artifact(), _fingerprint(), b"<html>github</html>")
+
+    assert "github_directory_not_found" in result.warnings
+    assert result.metadata["fetch_failures"][0]["status_code"] == 404
+
+
+def test_github_directory_network_exception_records_diagnostics(monkeypatch) -> None:
+    root_api = "https://api.github.com/repos/compound-finance/comet/contents/deployments?ref=main"
+    responses = {root_api: _FakeResponse(error=True)}
+    monkeypatch.setattr("app.ingestion.github_source_resolver.httpx.Client", lambda *args, **kwargs: _FakeClient(responses))
+
+    result = ExtractionPipeline().run(_root_artifact(), _fingerprint(), b"<html>github</html>")
+
+    assert "github_directory_fetch_failed" in result.warnings
+    failure = result.metadata["fetch_failures"][0]
+    assert failure["exception_type"] == "RuntimeError"
+    assert "fake fetch failure" in failure["exception_message"]
+
+
 def test_root_deployment_scan_fetches_priority_files_across_networks(monkeypatch) -> None:
     responses = _root_github_responses(
         {
@@ -270,6 +329,7 @@ def test_root_deployment_scan_partial_fetch_failure_keeps_other_networks(monkeyp
 class _FakeClient:
     def __init__(self, responses: dict[str, "_FakeResponse"]) -> None:
         self.responses = responses
+        self.requests: list[dict] = []
 
     def __enter__(self):
         return self
@@ -277,19 +337,34 @@ class _FakeClient:
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
 
-    def get(self, url: str):
+    def get(self, url: str, headers: dict | None = None):
+        self.requests.append({"url": url, "headers": headers or {}})
         key = url if url in self.responses else url.replace("https://raw.example/", "download:")
         response = self.responses[key]
         response.url = url
+        if response.error:
+            raise RuntimeError("fake fetch failure")
         return response
 
 
 class _FakeResponse:
-    def __init__(self, *, json_data=None, content: bytes = b"", error: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        json_data=None,
+        content: bytes = b"",
+        error: bool = False,
+        status_code: int = 200,
+        text: str | None = None,
+        headers: dict | None = None,
+    ) -> None:
         self._json_data = json_data
         self.content = content
         self.url = ""
         self.error = error
+        self.status_code = status_code
+        self.text = text if text is not None else content.decode("utf-8", errors="replace")
+        self.headers = headers or {}
 
     def raise_for_status(self) -> None:
         if self.error:

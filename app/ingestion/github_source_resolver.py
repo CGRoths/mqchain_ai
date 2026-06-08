@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,6 +144,10 @@ class _GitHubDirectoryCrawler:
         self.warnings: list[str] = []
         self.api_urls: list[str] = []
         self.fetch_failed_urls: list[str] = []
+        self.fetch_failures: list[dict] = []
+        self.github_rate_limit_limit: str | None = None
+        self.github_rate_limit_remaining: str | None = None
+        self.github_rate_limit_reset: str | None = None
         self.root_deployment_scan_mode = _is_root_deployment_path(tree.path)
         self.discovered_networks: set[str] = set()
         self.discovered_markets: set[tuple[str, str | None]] = set()
@@ -190,12 +195,14 @@ class _GitHubDirectoryCrawler:
         api_url = self._api_url(path)
         self.api_urls.append(api_url)
         try:
-            response = client.get(api_url)
-            response.raise_for_status()
+            response = client.get(api_url, headers=_github_headers())
+            self._record_rate_limit(response)
+            if getattr(response, "status_code", 200) >= 400:
+                self._record_fetch_failure(api_url, response=response)
+                return
             payload = response.json()
-        except Exception:
-            self.fetch_failed_urls.append(api_url)
-            self.warnings.append("github_directory_fetch_failed")
+        except Exception as exc:
+            self._record_fetch_failure(api_url, response=locals().get("response"), exception=exc)
             return
 
         if isinstance(payload, list):
@@ -222,7 +229,6 @@ class _GitHubDirectoryCrawler:
     def _crawl_root_deployment(self, client: httpx.Client) -> None:
         root_items = self._list_dir(client, self.tree.path)
         if root_items is None:
-            self.warnings.append("github_directory_fetch_failed")
             return
         if not root_items:
             self.warnings.append("github_directory_empty")
@@ -309,8 +315,6 @@ class _GitHubDirectoryCrawler:
             return
         content = self._content_from_item(client, item)
         if content is None:
-            self.fetch_failed_urls.append(str(item.get("url") or self._api_url(item_path)))
-            self.warnings.append("github_directory_fetch_failed")
             return
         if len(content) > settings.github_crawl_max_bytes_per_file:
             self.skipped_unsupported_file_count += 1
@@ -342,21 +346,33 @@ class _GitHubDirectoryCrawler:
             except Exception:
                 pass
         download_url = item.get("download_url")
+        url = str(download_url or item.get("url") or "")
         if not download_url:
+            self._record_fetch_failure(url or str(item.get("path") or ""), exception=RuntimeError("missing download_url"))
             return None
-        response = client.get(str(download_url))
-        response.raise_for_status()
-        return response.content
+        try:
+            response = client.get(str(download_url), headers=_github_headers())
+            self._record_rate_limit(response)
+            if getattr(response, "status_code", 200) >= 400:
+                self._record_fetch_failure(str(download_url), response=response)
+                return None
+            return response.content
+        except Exception as exc:
+            self._record_fetch_failure(str(download_url), response=locals().get("response"), exception=exc)
+            return None
 
     def _list_dir(self, client: httpx.Client, path: str) -> list[dict] | None:
         api_url = self._api_url(path)
         self.api_urls.append(api_url)
         try:
-            response = client.get(api_url)
-            response.raise_for_status()
+            response = client.get(api_url, headers=_github_headers())
+            self._record_rate_limit(response)
+            if getattr(response, "status_code", 200) >= 400:
+                self._record_fetch_failure(api_url, response=response)
+                return None
             payload = response.json()
-        except Exception:
-            self.fetch_failed_urls.append(api_url)
+        except Exception as exc:
+            self._record_fetch_failure(api_url, response=locals().get("response"), exception=exc)
             return None
         return payload if isinstance(payload, list) else None
 
@@ -385,6 +401,20 @@ class _GitHubDirectoryCrawler:
             self._depth_limit_reached = True
         self.warnings.append(warning)
 
+    def _record_rate_limit(self, response) -> None:
+        headers = getattr(response, "headers", {}) or {}
+        self.github_rate_limit_limit = headers.get("x-ratelimit-limit") or self.github_rate_limit_limit
+        self.github_rate_limit_remaining = headers.get("x-ratelimit-remaining") or self.github_rate_limit_remaining
+        self.github_rate_limit_reset = headers.get("x-ratelimit-reset") or self.github_rate_limit_reset
+
+    def _record_fetch_failure(self, url: str, *, response=None, exception: Exception | None = None) -> None:
+        self.fetch_failed_urls.append(url)
+        record = _fetch_failure_record(url, response=response, exception=exception)
+        self.fetch_failures.append(record)
+        self._record_rate_limit(response)
+        warning = _warning_for_failure(response=response, exception=exception)
+        self.warnings.append(warning)
+
     def _handle_root_migrations(self, path: str) -> None:
         if settings.github_crawl_include_migrations:
             self.root_migration_paths.append(path)
@@ -406,6 +436,10 @@ class _GitHubDirectoryCrawler:
             "skipped_unsupported_file_count": self.skipped_unsupported_file_count,
             "fetch_failed_count": len(self.fetch_failed_urls),
             "fetch_failed_urls": _dedupe(self.fetch_failed_urls),
+            "fetch_failures": self.fetch_failures,
+            "github_rate_limit_limit": self.github_rate_limit_limit,
+            "github_rate_limit_remaining": self.github_rate_limit_remaining,
+            "github_rate_limit_reset": self.github_rate_limit_reset,
         }
 
 
@@ -463,6 +497,58 @@ def _content_type_for_path(path: str) -> str | None:
         ".sol": "text/plain",
         ".md": "text/markdown",
     }.get(suffix)
+
+
+def _github_headers() -> dict:
+    headers = {
+        "User-Agent": "mqchain-ai",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = settings.github_api_token or os.getenv("MQCHAIN_GITHUB_API_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _fetch_failure_record(url: str, *, response=None, exception: Exception | None = None) -> dict:
+    headers = getattr(response, "headers", {}) or {}
+    record = {
+        "url": url,
+        "status_code": getattr(response, "status_code", None),
+        "response_text": _response_text(response),
+        "exception_type": type(exception).__name__ if exception else None,
+        "exception_message": str(exception) if exception else None,
+        "x_ratelimit_limit": headers.get("x-ratelimit-limit"),
+        "x_ratelimit_remaining": headers.get("x-ratelimit-remaining"),
+        "x_ratelimit_reset": headers.get("x-ratelimit-reset"),
+    }
+    return {key: value for key, value in record.items() if value not in {None, ""}}
+
+
+def _response_text(response) -> str | None:
+    if response is None:
+        return None
+    text = getattr(response, "text", None)
+    if text is None:
+        content = getattr(response, "content", b"")
+        try:
+            text = content.decode("utf-8", errors="replace")
+        except AttributeError:
+            text = str(content)
+    return str(text)[:500] if text not in {None, ""} else None
+
+
+def _warning_for_failure(*, response=None, exception: Exception | None = None) -> str:
+    status_code = getattr(response, "status_code", None)
+    headers = getattr(response, "headers", {}) or {}
+    if status_code == 401:
+        return "github_directory_auth_failed"
+    if status_code in {403, 429} and headers.get("x-ratelimit-remaining") == "0":
+        return "github_directory_rate_limited"
+    if status_code == 404:
+        return "github_directory_not_found"
+    return "github_directory_fetch_failed"
 
 
 def _dedupe(values: list[str]) -> list[str]:
