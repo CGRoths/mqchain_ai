@@ -33,6 +33,7 @@ class ExtractionNormalizer:
             text_sample=text_sample,
             entity_hint=_raw_entity_hint(raw_row.raw_row),
         )
+        structured_source = _is_structured_source(raw_row.source_input_type)
         network_label = self._infer_network(raw_row)
         normalized_network = NetworkNormalizer.normalize(network_label)
         if not valid_address_for_network(address, normalized_network):
@@ -60,10 +61,19 @@ class ExtractionNormalizer:
             raw_row.column_name,
             raw_row.raw_value,
         ]
-        role = self.profiles.infer_role(profile, role_values)
+        role, role_meta = _infer_role_with_fallback(
+            profiles=self.profiles,
+            profile=profile,
+            raw_row=raw_row,
+            role_values=role_values,
+            contract_name=contract_name,
+            wallet_label=wallet_label,
+            structured_source=structured_source,
+        )
         label_type = raw_row.extracted_label_type or self.profiles.infer_label_type(profile, role)
         confidence_parser = raw_row.confidence_parser or _parser_confidence(raw_row.extractor_name)
         confidence_role = 90 if role else 50
+        network_status = _network_status(network_label, normalized_network)
         confidence_initial = _confidence_initial(
             network=network_label,
             role=role,
@@ -71,15 +81,25 @@ class ExtractionNormalizer:
             source_input_type=raw_row.source_input_type,
             evidence_type=raw_row.evidence_type,
             confidence_parser=confidence_parser,
+            structured_source=structured_source,
+            role_fallback_used=bool(role_meta["role_fallback_used"]),
+            network_status=network_status,
         )
         warnings = list(raw_row.warnings)
-        if network_label and not normalized_network.canonical_chain:
-            warnings.append("unrecognized_source_network")
+        known_pipeline_network = _known_network_heading(network_label) is not None
+        if network_label and not normalized_network.canonical_chain and not known_pipeline_network:
+            warnings.append("unrecognized_network" if structured_source else "unrecognized_source_network")
         if not network_label:
-            warnings.append("missing_network_context")
+            warnings.append("missing_network" if structured_source else "missing_network_context")
+        if structured_source and not role and not _meaningful_role_candidate(contract_name or wallet_label):
+            warnings.append("missing_role_context")
+        if structured_source and _is_long_0x(address) and not network_label:
+            warnings.append("unknown_long_0x_address_family")
 
         raw_reference = {
             "extractor_name": raw_row.extractor_name,
+            "source_input_type": raw_row.source_input_type,
+            "evidence_type": raw_row.evidence_type,
             "heading_path": raw_row.heading_path,
             "section_heading": raw_row.section_heading,
             "raw_row": raw_row.raw_row,
@@ -96,7 +116,12 @@ class ExtractionNormalizer:
             "deployment": _raw_get(raw_row.raw_row, "Deployment"),
             "deployment_version": _raw_get(raw_row.raw_row, "Deployment Version", "Deployment"),
             "contract_name": contract_name,
-            "role_source": raw_row.extracted_role_hint or raw_row.raw_key or raw_row.column_name or contract_name,
+            "original_network": raw_row.extracted_network or _raw_get(raw_row.raw_row, "Network", "Chain", "Blockchain"),
+            "normalized_network": normalized_network.canonical_chain,
+            "role_source": role_meta["role_source"],
+            "role_fallback_used": role_meta["role_fallback_used"],
+            "role_fallback_source": role_meta["role_fallback_source"],
+            "original_role_text": role_meta["original_role_text"],
             "confidence_source": raw_row.confidence_source or profile.default_confidence_source,
             "confidence_parser": confidence_parser,
             "confidence_role": confidence_role,
@@ -175,6 +200,143 @@ NETWORK_HEADING_ALIASES = {
     "mantle": "Mantle",
 }
 
+STRUCTURED_SOURCE_INPUT_TYPES = {
+    "github_solidity_address_book",
+    "github_typescript_address_map",
+    "github_json_deployment_registry",
+    "github_yaml_deployment_registry",
+    "docs_html_deployment_table",
+    "docs_markdown_deployment_table",
+    "json_deployment_registry",
+    "yaml_deployment_registry",
+    "standardized_registry_upload",
+}
+
+USELESS_ROLE_NAMES = {
+    "address",
+    "contract_address",
+    "deployment_address",
+    "source",
+    "url",
+    "value",
+    "unknown",
+    "none",
+    "address_column",
+    "solidity_constant",
+    "raw_value",
+    "table_address",
+    "wallet",
+    "contract",
+}
+
+
+def _is_structured_source(source_input_type: str | None) -> bool:
+    return source_input_type in STRUCTURED_SOURCE_INPUT_TYPES
+
+
+def _infer_role_with_fallback(
+    *,
+    profiles: ProtocolProfileRegistry,
+    profile,
+    raw_row: RawExtractedRow,
+    role_values: list[Any],
+    contract_name: str | None,
+    wallet_label: str | None,
+    structured_source: bool,
+) -> tuple[str | None, dict[str, Any]]:
+    profile_role = profiles.infer_profile_role(profile, role_values)
+    if profile_role:
+        source = raw_row.extracted_role_hint or raw_row.raw_key or contract_name or wallet_label
+        return profile_role, {
+            "role_source": source,
+            "role_fallback_used": False,
+            "role_fallback_source": None,
+            "original_role_text": source,
+        }
+
+    if not structured_source:
+        return None, {
+            "role_source": None,
+            "role_fallback_used": False,
+            "role_fallback_source": None,
+            "original_role_text": None,
+        }
+
+    universal = profiles.infer_universal_role(role_values)
+    if universal:
+        source_name, original = _first_meaningful_role_source(raw_row, contract_name, wallet_label)
+        return universal, {
+            "role_source": source_name,
+            "role_fallback_used": True,
+            "role_fallback_source": source_name,
+            "original_role_text": original,
+        }
+
+    source_name, original = _first_meaningful_role_source(raw_row, contract_name, wallet_label)
+    if not source_name or not original:
+        return None, {
+            "role_source": None,
+            "role_fallback_used": False,
+            "role_fallback_source": None,
+            "original_role_text": None,
+        }
+    return _to_snake_role(original), {
+        "role_source": source_name,
+        "role_fallback_used": True,
+        "role_fallback_source": source_name,
+        "original_role_text": original,
+    }
+
+
+def _first_meaningful_role_source(
+    raw_row: RawExtractedRow,
+    contract_name: str | None,
+    wallet_label: str | None,
+) -> tuple[str | None, str | None]:
+    candidates = [
+        ("contract_name", raw_row.extracted_contract_name),
+        ("contract_name", contract_name),
+        ("raw_key", raw_row.raw_key),
+        ("wallet_label", wallet_label),
+        ("raw_row.Contract", _raw_get(raw_row.raw_row, "Contract")),
+        ("raw_row.Contract Name", _raw_get(raw_row.raw_row, "Contract Name")),
+        ("raw_row.Name", _raw_get(raw_row.raw_row, "Name")),
+        ("raw_row.Module", _raw_get(raw_row.raw_row, "Module")),
+        ("raw_row.Key", _raw_get(raw_row.raw_row, "Key")),
+        ("raw_row.Label", _raw_get(raw_row.raw_row, "Label")),
+        ("raw_row.Role", _raw_get(raw_row.raw_row, "Role")),
+        ("raw_row.Wallet Label", _raw_get(raw_row.raw_row, "Wallet Label", "Wallet Label / Role")),
+        ("column_name", raw_row.column_name),
+    ]
+    for source_name, value in candidates:
+        if _meaningful_role_candidate(value):
+            return source_name, str(value).strip()
+    return None, None
+
+
+def _meaningful_role_candidate(value: str | None) -> bool:
+    if value in {None, ""}:
+        return False
+    normalized = _to_snake_role(str(value))
+    return normalized not in USELESS_ROLE_NAMES and bool(re.search(r"[a-zA-Z]", str(value)))
+
+
+def _to_snake_role(value: str) -> str:
+    text = str(value).strip()
+    text = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", text)
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text.lower()
+
+
+def _network_status(network: str | None, normalized_network) -> str:
+    if not network:
+        return "missing"
+    if not normalized_network.canonical_chain and not _known_network_heading(network):
+        return "unrecognized"
+    return "recognized"
+
 
 def _known_or_clean_network_label(value: str | None) -> str | None:
     if not value:
@@ -182,7 +344,7 @@ def _known_or_clean_network_label(value: str | None) -> str | None:
     known = _known_network_heading(value)
     if known:
         return known
-    return normalize_network_label(value)
+    return _clean_original_network_text(value)
 
 
 def _known_network_heading(value: str | None) -> str | None:
@@ -203,6 +365,11 @@ def _clean_network_text(value: str) -> str:
     cleaned = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+def _clean_original_network_text(value: str) -> str:
+    cleaned = str(value).replace("\u200b", "")
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def _network_from_path(value: str | None) -> str | None:
@@ -269,7 +436,19 @@ def _confidence_initial(
     source_input_type: str,
     evidence_type: str,
     confidence_parser: int,
+    structured_source: bool,
+    role_fallback_used: bool,
+    network_status: str,
 ) -> int:
+    if structured_source and evidence_type in {"official_docs_deployment", "official_github_deployment", "source_extraction_context"}:
+        if network_status == "recognized" and role and not role_fallback_used:
+            return 95
+        if network_status == "recognized" and role:
+            return 88
+        if network_status in {"missing", "unrecognized"} and role:
+            return 75
+        if contract_name:
+            return 65
     if evidence_type == "official_docs_deployment" and source_input_type == "docs_html_deployment_table":
         if network and contract_name:
             return 90
@@ -281,6 +460,10 @@ def _confidence_initial(
     if role:
         score += 5
     return max(0, min(100, score))
+
+
+def _is_long_0x(address: str) -> bool:
+    return bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", address))
 
 
 def _json_safe(value: Any) -> Any:

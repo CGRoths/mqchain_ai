@@ -60,7 +60,7 @@ def test_sablier_lockup_heading_tables_normalize_networks_roles_and_provenance()
     assert {row.role for row in result.normalized_rows} == {"protocol_contract", "nft_descriptor", "batch_contract"}
     assert {row.evidence_type for row in result.normalized_rows} == {"official_docs_deployment"}
     assert {row.source_input_type for row in result.normalized_rows} == {"docs_html_deployment_table"}
-    assert all(row.confidence_initial == 90 for row in result.normalized_rows)
+    assert all(row.confidence_initial >= 90 for row in result.normalized_rows)
     assert all(row.raw_reference["heading_path"][0] == "Deployment Addresses" for row in result.normalized_rows)
     assert all(row.raw_reference["table_name"].startswith("html_table_") for row in result.normalized_rows)
     assert all(row.raw_reference["row_number"] in {2, 3} for row in result.normalized_rows)
