@@ -450,7 +450,10 @@ def _pipeline_parsed_source(
         return None
     if result.fatal_errors:
         return None
-    if not result.normalized_rows and not (return_empty_on_static_html_warning and "docs_table_not_detected_static_html" in result.warnings):
+    github_directory_warning = fingerprint.final_source_type == "github_directory" and bool(result.warnings)
+    if not result.normalized_rows and not (
+        github_directory_warning or (return_empty_on_static_html_warning and "docs_table_not_detected_static_html" in result.warnings)
+    ):
         return None
     metadata = dict(result.metadata)
     first_document = result.source_documents[0] if result.source_documents else None

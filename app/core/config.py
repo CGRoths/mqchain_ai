@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     github_crawl_max_depth: int = 3
     github_crawl_max_files: int = 100
     github_crawl_max_bytes_per_file: int = 1_000_000
+    github_crawl_include_migrations: bool = False
+    github_crawl_max_networks: int = 50
+    github_crawl_max_markets_per_network: int = 50
+    github_crawl_max_priority_files_per_market: int = 8
     preview_candidate_limit: int = 100
     max_extraction_candidates_per_job: int = 10_000
     pdf_max_pages: int | None = 50

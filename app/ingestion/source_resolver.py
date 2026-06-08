@@ -113,9 +113,11 @@ def _source_document_key(source_url: str | None, source_file_path: str | None, c
 
 def _resolved_github_directory(artifact: SourceArtifact, fingerprint: SourceFingerprint, directory) -> ResolvedSourceSet:
     documents: list[SourceDocument] = []
-    inferred_network, inferred_market = _infer_network_market_from_path(directory.tree.path)
+    directory_network, directory_market = _infer_network_market_from_path(directory.tree.path)
+    crawler_metadata = dict(getattr(directory, "metadata", {}) or {})
     for fetched in directory.files:
         content_hash = hashlib.sha256(fetched.content).hexdigest()
+        inferred_network, inferred_market = _infer_network_market_from_path(fetched.path)
         document = SourceDocument(
             source_document_key=_github_directory_document_key(
                 directory.tree.owner,
@@ -148,6 +150,7 @@ def _resolved_github_directory(artifact: SourceArtifact, fingerprint: SourceFing
                 "crawler_depth": fetched.depth,
                 "inferred_network": inferred_network,
                 "inferred_market": inferred_market,
+                "root_deployment_scan_mode": crawler_metadata.get("root_deployment_scan_mode", False),
             },
         )
         documents.append(document)
@@ -164,8 +167,9 @@ def _resolved_github_directory(artifact: SourceArtifact, fingerprint: SourceFing
             "github_branch": directory.tree.branch,
             "github_directory_path": directory.tree.path,
             "github_api_urls": directory.api_urls,
-            "inferred_network": inferred_network,
-            "inferred_market": inferred_market,
+            "inferred_network": directory_network,
+            "inferred_market": directory_market,
+            **crawler_metadata,
         },
     )
 
@@ -179,11 +183,11 @@ def _infer_network_market_from_path(path: str | None) -> tuple[str | None, str |
         return None, None
     parts = [part for part in path.replace("\\", "/").split("/") if part]
     lowered = [part.lower() for part in parts]
-    for marker in ("deployments", "addresses", "networks"):
+    for marker in ("deployments", "addresses", "networks", "chains"):
         if marker in lowered:
             index = lowered.index(marker)
             network = _network_label(parts[index + 1]) if index + 1 < len(parts) else None
-            market = _market_label(parts[index + 2]) if marker == "deployments" and index + 2 < len(parts) else None
+            market = _market_label(parts[index + 2]) if marker == "deployments" and index + 2 < len(parts) and "." not in parts[index + 2] else None
             return network, market
     return None, None
 

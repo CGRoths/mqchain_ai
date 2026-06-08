@@ -113,6 +113,8 @@ def _enrich_raw_row_from_document(raw_row: RawExtractedRow, document) -> None:
     if raw_row.extracted_network is None and metadata.get("inferred_network"):
         raw_row.extracted_network = str(metadata["inferred_network"])
     for target, source in (
+        ("inferred_network", "inferred_network"),
+        ("inferred_market", "inferred_market"),
         ("market", "inferred_market"),
         ("github_owner", "owner"),
         ("github_repo", "repo"),
@@ -120,6 +122,7 @@ def _enrich_raw_row_from_document(raw_row: RawExtractedRow, document) -> None:
         ("github_directory_path", "directory_path"),
         ("github_api_url", "github_api_url"),
         ("crawler_depth", "crawler_depth"),
+        ("root_deployment_scan_mode", "root_deployment_scan_mode"),
     ):
         value = metadata.get(source)
         if value not in {None, ""}:

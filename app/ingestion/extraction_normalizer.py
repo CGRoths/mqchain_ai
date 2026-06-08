@@ -115,6 +115,8 @@ class ExtractionNormalizer:
             "raw_value": _json_safe(raw_row.raw_value),
             "deployment": _raw_get(raw_row.raw_row, "Deployment"),
             "deployment_version": _raw_get(raw_row.raw_row, "Deployment Version", "Deployment"),
+            "inferred_network": _raw_get(raw_row.raw_row, "inferred_network"),
+            "inferred_market": _raw_get(raw_row.raw_row, "inferred_market"),
             "market": _raw_get(raw_row.raw_row, "market"),
             "github_owner": _raw_get(raw_row.raw_row, "github_owner"),
             "github_repo": _raw_get(raw_row.raw_row, "github_repo"),
@@ -122,6 +124,7 @@ class ExtractionNormalizer:
             "github_directory_path": _raw_get(raw_row.raw_row, "github_directory_path"),
             "github_api_url": _raw_get(raw_row.raw_row, "github_api_url"),
             "crawler_depth": _raw_get(raw_row.raw_row, "crawler_depth"),
+            "root_deployment_scan_mode": _raw_get_any(raw_row.raw_row, "root_deployment_scan_mode"),
             "contract_name": contract_name,
             "original_network": raw_row.extracted_network or _raw_get(raw_row.raw_row, "Network", "Chain", "Blockchain"),
             "normalized_network": normalized_network.canonical_chain,
@@ -441,6 +444,15 @@ def _raw_get(row: dict[str, Any], *keys: str) -> str | None:
         actual = normalized.get(_normalize_key(key))
         if actual is not None and row.get(actual) not in {None, ""}:
             return str(row.get(actual)).strip()
+    return None
+
+
+def _raw_get_any(row: dict[str, Any], *keys: str) -> Any | None:
+    normalized = {_normalize_key(key): key for key in row}
+    for key in keys:
+        actual = normalized.get(_normalize_key(key))
+        if actual is not None and row.get(actual) not in {None, ""}:
+            return row.get(actual)
     return None
 
 
