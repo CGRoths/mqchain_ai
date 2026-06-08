@@ -58,6 +58,7 @@ class ExtractionPipeline:
                 normalized.raw_reference.setdefault("source_type", document.final_source_type)
                 all_normalized_rows.append(normalized)
 
+        all_normalized_rows = _dedupe_normalized_rows(all_normalized_rows)
         table_preview, candidates, candidate_metadata = self.candidate_factory.from_normalized_rows(all_normalized_rows)
         metadata = {
             **resolved.metadata,
@@ -85,6 +86,24 @@ def _dedupe(values: list[str | None]) -> list[str]:
     for value in values:
         if value and value not in result:
             result.append(value)
+    return result
+
+
+def _dedupe_normalized_rows(rows: list[NormalizedExtractedRow]) -> list[NormalizedExtractedRow]:
+    seen: set[tuple[str | None, str | None, str | None, str, str | None]] = set()
+    result: list[NormalizedExtractedRow] = []
+    for row in rows:
+        key = (
+            row.source_url,
+            row.contract_name or row.wallet_label,
+            row.network,
+            row.normalized_address,
+            row.source_input_type,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
     return result
 
 

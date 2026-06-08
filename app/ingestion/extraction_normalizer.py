@@ -165,6 +165,9 @@ class ExtractionNormalizer:
             label = _known_network_heading(value)
             if label:
                 return label
+        docs_heading_network = _docs_heading_network_label(raw_row)
+        if docs_heading_network:
+            return docs_heading_network
         for value in (_network_from_path(raw_row.source_file_path), _network_from_path(urlparse(raw_row.source_url or "").path)):
             label = _known_network_heading(value)
             if label:
@@ -227,6 +230,21 @@ USELESS_ROLE_NAMES = {
     "table_address",
     "wallet",
     "contract",
+}
+
+GENERIC_DOCS_HEADINGS = {
+    "deployment",
+    "deployments",
+    "deployment_address",
+    "deployment_addresses",
+    "lockup_deployments",
+    "flow_deployments",
+    "mainnet",
+    "mainnets",
+    "testnet",
+    "testnets",
+    "network",
+    "networks",
 }
 
 
@@ -359,6 +377,21 @@ def _known_network_heading(value: str | None) -> str | None:
     return None
 
 
+def _docs_heading_network_label(raw_row: RawExtractedRow) -> str | None:
+    if raw_row.source_input_type not in {"docs_html_deployment_table", "docs_markdown_deployment_table"}:
+        return None
+    if len(raw_row.heading_path) < 2:
+        return None
+    for value in (raw_row.section_heading, *reversed(raw_row.heading_path)):
+        if not value:
+            continue
+        cleaned = _clean_original_network_text(value)
+        if _to_snake_role(cleaned) in GENERIC_DOCS_HEADINGS:
+            continue
+        return cleaned
+    return None
+
+
 def _clean_network_text(value: str) -> str:
     cleaned = str(value).replace("\u200b", "")
     cleaned = re.sub(r"[_/]+", " ", cleaned).strip()
@@ -441,6 +474,11 @@ def _confidence_initial(
     network_status: str,
 ) -> int:
     if structured_source and evidence_type in {"official_docs_deployment", "official_github_deployment", "source_extraction_context"}:
+        if evidence_type == "official_docs_deployment" and source_input_type in {"docs_html_deployment_table", "docs_markdown_deployment_table"}:
+            if network_status == "recognized" and contract_name:
+                return 95
+            if network_status == "missing" and contract_name:
+                return 75
         if network_status == "recognized" and role and not role_fallback_used:
             return 95
         if network_status == "recognized" and role:
