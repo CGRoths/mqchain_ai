@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -189,3 +189,91 @@ class RegistryAddress(TimestampMixin, Base):
     normalized_address: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
     entity_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     role: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
+
+class Entity(TimestampMixin, Base):
+    __tablename__ = "mq_entities"
+    __table_args__ = (UniqueConstraint("entity_name", name="uq_mq_entities_entity_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    entity_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sub_category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    approved_addresses = relationship("ApprovedAddress", back_populates="entity")
+
+
+class ApprovedAddress(TimestampMixin, Base):
+    __tablename__ = "mq_approved_addresses"
+    __table_args__ = (UniqueConstraint("entity_id", "chain_slug", "normalized_address", name="uq_mq_approved_addresses_entity_chain_address"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity_id: Mapped[int] = mapped_column(ForeignKey("mq_entities.id"), nullable=False, index=True)
+    address: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    normalized_address: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    source_network: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    chain_slug: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    address_class: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    source_trust_status: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    approval_readiness_at_approval: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    confidence_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="approved", index=True)
+    first_approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    entity = relationship("Entity", back_populates="approved_addresses")
+    roles = relationship("ApprovedAddressRole", back_populates="approved_address")
+    evidence = relationship("ApprovedAddressEvidence", back_populates="approved_address")
+    events = relationship("ApprovalEvent", back_populates="approved_address")
+
+
+class ApprovedAddressRole(TimestampMixin, Base):
+    __tablename__ = "mq_approved_address_roles"
+    __table_args__ = (UniqueConstraint("approved_address_id", "role", name="uq_mq_approved_address_roles_address_role"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    approved_address_id: Mapped[int] = mapped_column(ForeignKey("mq_approved_addresses.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    role_confidence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="approved", index=True)
+
+    approved_address = relationship("ApprovedAddress", back_populates="roles")
+
+
+class ApprovedAddressEvidence(Base):
+    __tablename__ = "mq_approved_address_evidence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    approved_address_id: Mapped[int] = mapped_column(ForeignKey("mq_approved_addresses.id"), nullable=False, index=True)
+    candidate_id: Mapped[int | None] = mapped_column(ForeignKey("mq_address_candidates.id"), nullable=True, index=True)
+    source_document_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_documents.id"), nullable=True, index=True)
+    evidence_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    source_type: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source_input_type: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_reference: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    confidence_contribution: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    approved_address = relationship("ApprovedAddress", back_populates="evidence")
+
+
+class ApprovalEvent(Base):
+    __tablename__ = "mq_approval_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    approved_address_id: Mapped[int | None] = mapped_column(ForeignKey("mq_approved_addresses.id"), nullable=True, index=True)
+    candidate_group_key: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="system", index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    approved_address = relationship("ApprovedAddress", back_populates="events")

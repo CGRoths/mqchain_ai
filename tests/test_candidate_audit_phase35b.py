@@ -112,10 +112,10 @@ def test_auto_approvable_preview_does_not_mutate_db() -> None:
         assert report["auto_approvable_count"] == 2
         assert report["needs_review_count"] == 1
         assert report["blocked_count"] == 1
-        assert report["count_by_review_bucket"]["auto_approvable_official_core"] == 1
-        assert report["count_by_review_bucket"]["auto_approvable_cex_reserve"] == 1
+        assert report["count_by_review_bucket"]["ready_for_approval_core_protocol"] == 1
+        assert report["count_by_review_bucket"]["ready_for_approval_cex_reserve"] == 1
         assert report["count_by_review_bucket"]["needs_review_hot_cold_wallet"] == 1
-        assert report["count_by_review_bucket"]["blocked_explorer_link_only"] == 1
+        assert report["count_by_review_bucket"]["not_auto_approvable_explorer_link_only"] == 1
         assert core.status == "needs_review"
         assert reserve.status == "needs_review"
 
@@ -135,7 +135,7 @@ def test_relation_dependency_and_low_confidence_buckets() -> None:
         report = audit_candidates(db, source_job_id=job.id)
 
         assert classify_candidate_address_class(relation) == "protocol_relation_dependency"
-        assert report["count_by_review_bucket"]["needs_review_relation_dependency"] == 1
+        assert report["count_by_review_bucket"]["needs_review_generic_wallet"] == 1
         assert report["count_by_review_bucket"]["needs_review_official_low_confidence"] == 1
 
 
@@ -219,8 +219,8 @@ def test_refined_review_buckets_and_no_mutation() -> None:
 
         assert report["count_by_review_bucket"]["needs_review_official_low_confidence"] == 2
         assert report["count_by_review_bucket"]["needs_review_hot_cold_wallet"] == 2
-        assert report["count_by_review_bucket"]["blocked_explorer_link_only"] == 1
-        assert report["count_by_review_bucket"]["blocked_unknown"] == 1
+        assert report["count_by_review_bucket"]["not_auto_approvable_explorer_link_only"] == 1
+        assert report["count_by_review_bucket"]["needs_review_unmapped_official_role"] == 1
         assert before == after
 
 

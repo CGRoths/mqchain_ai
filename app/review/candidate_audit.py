@@ -43,6 +43,8 @@ def audit_candidates(db: Session, source_job_id: int | None = None, limit_sample
     sample_candidates: list[dict] = []
     unique_keys: Counter[tuple[str | None, str | None, str | None, str | None, str]] = Counter()
     unique_address_classes: dict[tuple[str | None, str | None, str | None, str | None, str], str] = {}
+    unique_source_trust: dict[tuple[str | None, str | None, str | None, str | None, str], str] = {}
+    unique_approval_readiness: dict[tuple[str | None, str | None, str | None, str | None, str], str] = {}
     counts = _empty_counters()
     missing_evidence_count = 0
     auto_approvable_count = 0
@@ -56,20 +58,30 @@ def audit_candidates(db: Session, source_job_id: int | None = None, limit_sample
             missing_evidence_count += 1
         address_class = classify_candidate_address_class(candidate, _first_evidence_payload(candidate))
         chain_slug = _candidate_chain_slug(candidate)
-        review_bucket = _review_bucket(candidate, address_class)
-        if review_bucket.startswith("auto_approvable"):
+        source_trust_status = classify_source_trust_status(candidate, _first_evidence_payload(candidate))
+        approval_readiness = classify_approval_readiness(
+            candidate,
+            source_trust_status,
+            address_class,
+            candidate.confidence_initial,
+            evidence_count,
+        )
+        review_bucket = approval_readiness
+        if approval_readiness.startswith("ready_for_approval"):
             auto_approvable_count += 1
-        elif review_bucket.startswith("needs_review"):
+        elif approval_readiness.startswith("needs_review"):
             needs_review_count += 1
         else:
             blocked_count += 1
 
-        _increment_counts(counts, candidate, address_class, review_bucket, chain_slug)
+        _increment_counts(counts, candidate, address_class, source_trust_status, approval_readiness, review_bucket, chain_slug)
         unique_key = (candidate.entity_name, chain_slug, candidate.normalized_address, candidate.suggested_role, address_class)
         unique_keys[unique_key] += 1
         unique_address_classes[unique_key] = address_class
+        unique_source_trust[unique_key] = _stronger_source_trust(unique_source_trust.get(unique_key), source_trust_status)
+        unique_approval_readiness[unique_key] = _stronger_approval_readiness(unique_approval_readiness.get(unique_key), approval_readiness)
         if len(sample_candidates) < limit_samples:
-            sample_candidates.append(_candidate_sample(candidate, evidence_count, address_class, review_bucket, chain_slug))
+            sample_candidates.append(_candidate_sample(candidate, evidence_count, address_class, source_trust_status, approval_readiness, review_bucket, chain_slug))
 
     duplicate_groups_top = _duplicate_groups(unique_keys, limit_samples)
     duplicate_samples = duplicate_groups_top
@@ -79,6 +91,8 @@ def audit_candidates(db: Session, source_job_id: int | None = None, limit_sample
     unique_candidate_count = len(unique_keys)
     max_duplicate_group_size = max(unique_keys.values(), default=0)
     count_by_unique_address_class = Counter(unique_address_classes.values())
+    count_by_unique_source_trust_status = Counter(unique_source_trust.values())
+    count_by_unique_approval_readiness = Counter(unique_approval_readiness.values())
     staking_stats = _staking_stats(unique_keys, limit_samples)
 
     if candidates and total_evidence == 0:
@@ -108,6 +122,10 @@ def audit_candidates(db: Session, source_job_id: int | None = None, limit_sample
         "count_by_confidence_bucket": _string_counter(counts["confidence_bucket"]),
         "count_by_address_class": _string_counter(counts["address_class"]),
         "count_by_unique_address_class": _string_counter(count_by_unique_address_class),
+        "count_by_source_trust_status": _string_counter(counts["source_trust_status"]),
+        "count_by_approval_readiness": _string_counter(counts["approval_readiness"]),
+        "count_by_unique_source_trust_status": _string_counter(count_by_unique_source_trust_status),
+        "count_by_unique_approval_readiness": _string_counter(count_by_unique_approval_readiness),
         "count_by_review_bucket": _string_counter(counts["review_bucket"]),
         "missing_entity_count": counts["missing"]["entity"],
         "missing_network_count": counts["missing"]["network"],
@@ -160,34 +178,78 @@ def classify_candidate_address_class(candidate, evidence_payload: dict | None = 
     return "unknown_candidate"
 
 
-def _review_bucket(candidate: AddressCandidate, address_class: str) -> str:
+def classify_source_trust_status(candidate, evidence_payload: dict | None = None) -> str:
+    evidence_text = _candidate_evidence_text(candidate, evidence_payload)
+    role = (candidate.suggested_role or "").strip().lower()
+
+    if "hacken proof of reserves audit pdf" in evidence_text:
+        return "official_audit_confirmed"
+    if "official binance por hotcold csv" in evidence_text:
+        return "official_confirmed"
+    if "validator mapping from okx eth staking por csv" in evidence_text:
+        return "official_staking_mapping"
+    if "okx eth staking por csv" in evidence_text:
+        return "official_staking_mapping"
+    if "official coinex eth staking validator mapping" in evidence_text:
+        return "official_staking_mapping"
+    if "official coinex cet staking delegator list" in evidence_text:
+        return "official_staking_mapping" if role in {"staking_deposit_wallet", "staking_withdrawal_wallet"} else "official_but_unmapped_role"
+    if "deribit public reserve-address list" in evidence_text:
+        return "official_published_list"
+    if "huobi / htx por csv signed address evidence" in evidence_text:
+        return "official_confirmed"
+    if "bitmex token reserves yaml" in evidence_text:
+        return "official_confirmed"
+    if "coinmarketcap exchange reserves page / reported directly by exchange" in evidence_text:
+        return "official_published_list"
+    if "txt explorer link list" in evidence_text:
+        return "weak_reference"
+    if candidate.evidence_type in OFFICIAL_CORE_EVIDENCE_TYPES:
+        return "official_confirmed"
+    if "official" in evidence_text and "staking" in evidence_text:
+        return "official_staking_mapping"
+    if "official" in evidence_text:
+        return "official_confirmed"
+    if any(marker in evidence_text for marker in ("proof of reserves", "por", "audit", "audited", "hacken")):
+        return "official_audit_confirmed"
+    if "fallback" in evidence_text or "inferred" in evidence_text:
+        return "inferred"
+    return "unknown"
+
+
+def classify_approval_readiness(candidate, source_trust_status: str, address_class: str, confidence_initial: int | None, evidence_count: int) -> str:
     if not candidate.entity_name:
-        return "blocked_missing_entity"
+        return "invalid_missing_entity"
     if not candidate.source_network:
-        return "blocked_missing_network"
+        return "invalid_missing_network"
     if not candidate.suggested_role:
-        return "blocked_missing_role"
-    if not candidate.evidence:
-        return "blocked_missing_evidence"
+        return "invalid_missing_role"
     if not candidate.address or not candidate.normalized_address:
-        return "blocked_missing_address"
+        return "invalid_missing_address"
+    if evidence_count <= 0:
+        return "invalid_missing_evidence"
     if address_class == "explorer_link_only":
-        return "blocked_explorer_link_only"
+        return "not_auto_approvable_explorer_link_only"
+    official = _is_trusted_official_status(source_trust_status)
     if address_class == "unknown_candidate":
-        return "blocked_unknown"
+        return "needs_review_unmapped_official_role" if official else "not_auto_approvable_unknown"
     if address_class in {"staking_deposit_wallet", "staking_withdrawal_wallet"}:
         return "needs_review_staking_mapping"
     if address_class in {"cex_hot_wallet", "cex_cold_wallet"}:
         return "needs_review_hot_cold_wallet"
-    if address_class == "cex_reserve_wallet" and _is_official_enough(candidate):
-        return "auto_approvable_cex_reserve" if candidate.confidence_initial >= 90 else "needs_review_official_low_confidence"
-    if address_class == "core_protocol_contract" and _is_official_enough(candidate):
-        return "auto_approvable_official_core" if candidate.confidence_initial >= 90 else "needs_review_official_low_confidence"
-    if address_class == "protocol_relation_dependency" or address_class == "external_dependency":
-        return "needs_review_relation_dependency"
-    if candidate.confidence_initial < 75:
-        return "blocked_low_confidence"
-    return "needs_review_generic"
+    score = int(confidence_initial or 0)
+    if address_class == "cex_reserve_wallet" and official:
+        return "ready_for_approval_cex_reserve" if score >= 85 else "needs_review_official_low_confidence"
+    if address_class == "core_protocol_contract" and official:
+        return "ready_for_approval_core_protocol" if score >= 85 else "needs_review_official_low_confidence"
+    if address_class == "generic_wallet" and official:
+        return "needs_review_generic_wallet"
+    return "needs_review_generic_wallet"
+
+
+def _review_bucket(candidate: AddressCandidate, address_class: str) -> str:
+    source_trust_status = classify_source_trust_status(candidate, _first_evidence_payload(candidate))
+    return classify_approval_readiness(candidate, source_trust_status, address_class, candidate.confidence_initial, len(candidate.evidence))
 
 
 def _is_official_enough(candidate: AddressCandidate) -> bool:
@@ -204,6 +266,23 @@ def _is_official_enough(candidate: AddressCandidate) -> bool:
         and candidate.source_input_type == "pdf_audited_wallet_table"
         and "audited_wallet" in evidence_types
     )
+
+
+def _is_trusted_official_status(source_trust_status: str) -> bool:
+    return source_trust_status in {
+        "official_confirmed",
+        "official_audit_confirmed",
+        "official_published_list",
+        "official_staking_mapping",
+        "official_but_unmapped_role",
+    }
+
+
+def _candidate_evidence_text(candidate, evidence_payload: dict | None = None) -> str:
+    values: list[Any] = [candidate.evidence_type, candidate.source_type, candidate.source_input_type, candidate.raw_reference or {}, evidence_payload or {}]
+    for evidence in getattr(candidate, "evidence", []) or []:
+        values.extend([evidence.evidence_type, evidence.source_type, evidence.payload or {}, evidence.confidence_reason])
+    return " ".join(str(value).lower() for value in _flatten(values))
 
 
 def _evidence_count(db: Session, source_job_id: int | None) -> int:
@@ -225,6 +304,8 @@ def _empty_counters() -> dict[str, Counter | defaultdict]:
         "status": Counter(),
         "confidence_bucket": Counter(),
         "address_class": Counter(),
+        "source_trust_status": Counter(),
+        "approval_readiness": Counter(),
         "review_bucket": Counter(),
         "missing": defaultdict(int),
     }
@@ -272,7 +353,55 @@ def _group_sample(key: tuple[str | None, str | None, str | None, str | None, str
     }
 
 
-def _increment_counts(counts: dict[str, Counter | defaultdict], candidate: AddressCandidate, address_class: str, review_bucket: str, chain_slug: str | None) -> None:
+SOURCE_TRUST_RANK = {
+    "unknown": 0,
+    "inferred": 1,
+    "weak_reference": 2,
+    "official_but_unmapped_role": 3,
+    "official_published_list": 4,
+    "official_staking_mapping": 5,
+    "official_audit_confirmed": 6,
+    "official_confirmed": 7,
+}
+APPROVAL_READINESS_RANK = {
+    "invalid_missing_entity": 0,
+    "invalid_missing_network": 0,
+    "invalid_missing_role": 0,
+    "invalid_missing_address": 0,
+    "invalid_missing_evidence": 0,
+    "not_auto_approvable_unknown": 1,
+    "not_auto_approvable_explorer_link_only": 1,
+    "needs_review_generic_wallet": 2,
+    "needs_review_unmapped_official_role": 3,
+    "needs_review_hot_cold_wallet": 4,
+    "needs_review_staking_mapping": 5,
+    "needs_review_official_low_confidence": 6,
+    "ready_for_approval_core_protocol": 7,
+    "ready_for_approval_cex_reserve": 7,
+}
+
+
+def _stronger_source_trust(current: str | None, new_value: str) -> str:
+    if current is None:
+        return new_value
+    return new_value if SOURCE_TRUST_RANK.get(new_value, 0) > SOURCE_TRUST_RANK.get(current, 0) else current
+
+
+def _stronger_approval_readiness(current: str | None, new_value: str) -> str:
+    if current is None:
+        return new_value
+    return new_value if APPROVAL_READINESS_RANK.get(new_value, 0) > APPROVAL_READINESS_RANK.get(current, 0) else current
+
+
+def _increment_counts(
+    counts: dict[str, Counter | defaultdict],
+    candidate: AddressCandidate,
+    address_class: str,
+    source_trust_status: str,
+    approval_readiness: str,
+    review_bucket: str,
+    chain_slug: str | None,
+) -> None:
     counts["source_job_id"][candidate.source_job_id] += 1
     counts["entity_name"][candidate.entity_name or "-"] += 1
     counts["source_network"][candidate.source_network or "-"] += 1
@@ -283,6 +412,8 @@ def _increment_counts(counts: dict[str, Counter | defaultdict], candidate: Addre
     counts["status"][candidate.status or "-"] += 1
     counts["confidence_bucket"][_confidence_bucket(candidate.confidence_initial)] += 1
     counts["address_class"][address_class] += 1
+    counts["source_trust_status"][source_trust_status] += 1
+    counts["approval_readiness"][approval_readiness] += 1
     counts["review_bucket"][review_bucket] += 1
     if not candidate.entity_name:
         counts["missing"]["entity"] += 1
@@ -294,7 +425,15 @@ def _increment_counts(counts: dict[str, Counter | defaultdict], candidate: Addre
         counts["missing"]["address"] += 1
 
 
-def _candidate_sample(candidate: AddressCandidate, evidence_count: int, address_class: str, review_bucket: str, chain_slug: str | None) -> dict:
+def _candidate_sample(
+    candidate: AddressCandidate,
+    evidence_count: int,
+    address_class: str,
+    source_trust_status: str,
+    approval_readiness: str,
+    review_bucket: str,
+    chain_slug: str | None,
+) -> dict:
     return {
         "id": candidate.id,
         "source_job_id": candidate.source_job_id,
@@ -310,6 +449,8 @@ def _candidate_sample(candidate: AddressCandidate, evidence_count: int, address_
         "status": candidate.status,
         "confidence_initial": candidate.confidence_initial,
         "address_class": address_class,
+        "source_trust_status": source_trust_status,
+        "approval_readiness": approval_readiness,
         "review_bucket": review_bucket,
         "evidence_count": evidence_count,
     }

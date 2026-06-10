@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from app.api.deps import DBSession
+from app.review.approval_registry import approve_candidate_groups
 from app.review.candidate_audit import audit_candidates
 from app.review.official_auto_approval import auto_approve_official_candidates
 
@@ -30,6 +31,13 @@ class CandidateAuditRequest(BaseModel):
     limit_samples: int = 20
 
 
+class ApproveCandidateGroupsRequest(BaseModel):
+    source_job_id: int | None = None
+    approval_readiness: str | None = None
+    dry_run: bool = True
+    actor: str = "system"
+
+
 @api_router.post("/auto-approve-official", response_model=AutoApproveOfficialResponse)
 def auto_approve_official(payload: AutoApproveOfficialRequest, db: DBSession) -> dict:
     return auto_approve_official_candidates(
@@ -46,4 +54,15 @@ def candidate_audit(payload: CandidateAuditRequest, db: DBSession) -> dict:
         db,
         source_job_id=payload.source_job_id,
         limit_samples=payload.limit_samples,
+    )
+
+
+@api_router.post("/approve-candidate-groups")
+def approve_groups(payload: ApproveCandidateGroupsRequest, db: DBSession) -> dict:
+    return approve_candidate_groups(
+        db,
+        source_job_id=payload.source_job_id,
+        approval_readiness=payload.approval_readiness,
+        dry_run=payload.dry_run,
+        actor=payload.actor,
     )
