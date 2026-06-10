@@ -16,6 +16,12 @@ class NetworkNormalizer:
     NETWORKS: dict[str, tuple[str, int | None, str]] = {
         "ethereum": ("ethereum", 1, "evm"),
         "eth": ("ethereum", 1, "evm"),
+        "eth staking": ("ethereum", 1, "evm"),
+        "ethereum eth staking": ("ethereum", 1, "evm"),
+        "ethereum evm": ("ethereum", 1, "evm"),
+        "ethereum evm masked": ("ethereum", 1, "evm"),
+        "eth erc20": ("ethereum", 1, "evm"),
+        "erc20": ("ethereum", 1, "evm"),
         "mainnet": ("ethereum", 1, "evm"),
         "ethereum mainnet": ("ethereum", 1, "evm"),
         "arbitrum": ("arbitrum", 42161, "evm"),
@@ -27,14 +33,20 @@ class NetworkNormalizer:
         "blast": ("blast", 81457, "evm"),
         "bsc": ("bsc", 56, "evm"),
         "binance smart chain": ("bsc", 56, "evm"),
+        "bnb smart chain": ("bsc", 56, "evm"),
+        "bnb smart chain bep20": ("bsc", 56, "evm"),
+        "bep20": ("bsc", 56, "evm"),
         "bnb chain": ("bsc", 56, "evm"),
         "optimism": ("optimism", 10, "evm"),
         "polygon": ("polygon", 137, "evm"),
+        "matic": ("polygon", 137, "evm"),
         "avalanche": ("avalanche-c", 43114, "evm"),
+        "avaxc": ("avalanche-c", 43114, "evm"),
         "avalanche-c": ("avalanche-c", 43114, "evm"),
         "avalanche c": ("avalanche-c", 43114, "evm"),
         "avalanche c-chain": ("avalanche-c", 43114, "evm"),
         "avalanche c chain": ("avalanche-c", 43114, "evm"),
+        "avalanche c chain avaxc": ("avalanche-c", 43114, "evm"),
         "avalanche-x": ("avalanche-x", None, "avalanche"),
         "avalanche x": ("avalanche-x", None, "avalanche"),
         "celo": ("celo", 42220, "evm"),
@@ -121,6 +133,7 @@ class NetworkNormalizer:
     def _key(value: str) -> str:
         key = value.strip().lower()
         key = key.replace("zk-sync", "zksync").replace("zk sync", "zksync")
+        key = re.sub(r"[()]+", " ", key)
         key = re.sub(r"[\s_/]+", " ", key.replace("-", " "))
         key = re.sub(r"\s+", " ", key).strip()
         return key

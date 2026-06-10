@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db.database import Base, SessionLocal, engine, init_db
+from app.ingestion.network_normalizer import NetworkNormalizer
 from app.main import app
 from app.models.intake import AddressCandidate, AddressEvidence, IntakePreview, SourceDocument, SourceJob
 from app.review.candidate_audit import audit_candidates, classify_candidate_address_class
@@ -49,6 +50,7 @@ def test_audit_scans_all_candidates_and_counts_core_dimensions() -> None:
         assert report["count_by_evidence_type"]["audited_wallet"] == 3
         assert report["count_by_source_input_type"]["xlsx_multi_sheet_registry"] == 3
         assert report["count_by_status"]["needs_review"] == 4
+        assert report["unique_candidate_count"] == 4
         assert len(report["sample_candidates"]) == 2
 
 
@@ -87,7 +89,11 @@ def test_missing_fields_evidence_and_duplicates_are_counted() -> None:
         assert report["missing_address_count"] == 1
         assert report["missing_evidence_count"] == 1
         assert report["duplicate_count"] == 1
+        assert report["duplicate_row_count"] == 1
+        assert report["duplicate_group_count"] == 1
+        assert report["max_duplicate_group_size"] == 2
         assert report["duplicate_samples"][0]["count"] == 2
+        assert report["duplicate_groups_top"][0]["count"] == 2
         assert "candidates_missing_evidence" in report["warnings"]
 
 
@@ -130,7 +136,92 @@ def test_relation_dependency_and_low_confidence_buckets() -> None:
 
         assert classify_candidate_address_class(relation) == "protocol_relation_dependency"
         assert report["count_by_review_bucket"]["needs_review_relation_dependency"] == 1
-        assert report["count_by_review_bucket"]["blocked_low_confidence"] == 1
+        assert report["count_by_review_bucket"]["needs_review_official_low_confidence"] == 1
+
+
+def test_network_labels_are_normalized_for_audit_counts() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        _candidate(db, job, source_network="Ethereum / ETH Staking", chain_slug=None)
+        _candidate(db, job, source_network="BTC", chain_slug=None, address="bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080", normalized_address="bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080")
+        _candidate(db, job, source_network="BNB Chain", chain_slug=None)
+        _candidate(db, job, source_network="TRX", chain_slug=None, address="TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj", normalized_address="TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj")
+
+        report = audit_candidates(db, source_job_id=job.id)
+
+        assert report["count_by_source_network"]["Ethereum / ETH Staking"] == 1
+        assert report["count_by_chain_slug"]["ethereum"] == 1
+        assert report["count_by_chain_slug"]["bitcoin"] == 1
+        assert report["count_by_chain_slug"]["bsc"] == 1
+        assert report["count_by_chain_slug"]["tron"] == 1
+
+
+@pytest.mark.parametrize(
+    ("label", "chain_slug"),
+    [
+        ("Ethereum / ETH Staking", "ethereum"),
+        ("Ethereum / EVM", "ethereum"),
+        ("Ethereum / EVM (masked)", "ethereum"),
+        ("ETH", "ethereum"),
+        ("ETH/ERC20", "ethereum"),
+        ("BNB Chain", "bsc"),
+        ("BNB Smart Chain / BEP20", "bsc"),
+        ("BTC", "bitcoin"),
+        ("TRX", "tron"),
+        ("XRP Ledger", "xrp"),
+        ("Avalanche C-Chain / AVAXC", "avalanche-c"),
+        ("MATIC", "polygon"),
+        ("SOL", "solana"),
+        ("LTC", "litecoin"),
+        ("DOGE", "dogecoin"),
+    ],
+)
+def test_required_network_aliases_normalize(label: str, chain_slug: str) -> None:
+    assert NetworkNormalizer.normalize(label).canonical_chain == chain_slug
+
+
+def test_duplicate_grouping_and_staking_compression_counts() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        for _ in range(3):
+            _candidate(db, job, suggested_role="staking_deposit_wallet", address="0x3333333333333333333333333333333333333333", normalized_address="0x3333333333333333333333333333333333333333")
+        for _ in range(2):
+            _candidate(db, job, suggested_role="staking_withdrawal_wallet", address="0x4444444444444444444444444444444444444444", normalized_address="0x4444444444444444444444444444444444444444")
+
+        report = audit_candidates(db, source_job_id=job.id)
+
+        assert report["total_candidates"] == 5
+        assert report["unique_candidate_count"] == 2
+        assert report["duplicate_row_count"] == 3
+        assert report["duplicate_group_count"] == 2
+        assert report["max_duplicate_group_size"] == 3
+        assert report["count_by_unique_address_class"]["staking_deposit_wallet"] == 1
+        assert report["staking_unique_candidate_count"] == 2
+        assert report["staking_raw_row_count"] == 5
+        assert report["staking_duplicate_row_count"] == 3
+        assert report["staking_group_samples"][0]["count"] == 3
+        assert report["count_by_review_bucket"]["needs_review_staking_mapping"] == 5
+
+
+def test_refined_review_buckets_and_no_mutation() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        reserve = _candidate(db, job, suggested_role="cex_por_wallet", confidence_initial=60)
+        hacken_reserve = _candidate(db, job, suggested_role="cex_por_wallet", evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=60)
+        hot = _candidate(db, job, suggested_role="cex_hot_wallet", confidence_initial=60)
+        cold = _candidate(db, job, suggested_role="cex_cold_wallet", confidence_initial=60)
+        explorer = _candidate(db, job, suggested_role="wallet_address_from_explorer_link", confidence_initial=60)
+        unknown = _candidate(db, job, suggested_role="mystery_role", confidence_initial=95)
+        before = {candidate.id: candidate.status for candidate in [reserve, hacken_reserve, hot, cold, explorer, unknown]}
+
+        report = audit_candidates(db, source_job_id=job.id)
+        after = {candidate.id: db.get(AddressCandidate, candidate.id).status for candidate in [reserve, hacken_reserve, hot, cold, explorer, unknown]}
+
+        assert report["count_by_review_bucket"]["needs_review_official_low_confidence"] == 2
+        assert report["count_by_review_bucket"]["needs_review_hot_cold_wallet"] == 2
+        assert report["count_by_review_bucket"]["blocked_explorer_link_only"] == 1
+        assert report["count_by_review_bucket"]["blocked_unknown"] == 1
+        assert before == after
 
 
 def test_candidate_audit_api_endpoint(client: TestClient) -> None:
@@ -157,6 +248,7 @@ def _candidate(
     source_input_type: str = "xlsx_multi_sheet_registry",
     entity_name: str | None = "Bybit",
     source_network: str | None = "Ethereum",
+    chain_slug: str | None = "ethereum",
     suggested_role: str | None = "cex_por_wallet",
     confidence_initial: int = 95,
     address: str = "0x1111111111111111111111111111111111111111",
@@ -183,7 +275,7 @@ def _candidate(
         entity_name=entity_name,
         source_network=source_network,
         chain_guess="evm" if source_network else None,
-        chain_slug="ethereum" if source_network else None,
+        chain_slug=chain_slug if source_network else None,
         chain_id=1 if source_network else None,
         address_family="evm" if address else None,
         suggested_role=suggested_role,
