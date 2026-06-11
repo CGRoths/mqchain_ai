@@ -17,6 +17,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Approve unique candidate groups into the approved address registry.")
     parser.add_argument("--source-job-id", type=int, default=None)
     parser.add_argument("--readiness", dest="approval_readiness", default=None)
+    parser.add_argument("--allow-review-readiness", default=None)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", default=True)
     mode.add_argument("--apply", action="store_true")
@@ -30,6 +31,7 @@ def main() -> int:
             db,
             source_job_id=args.source_job_id,
             approval_readiness=args.approval_readiness,
+            allow_review_readiness=args.allow_review_readiness,
             dry_run=dry_run,
             actor=args.actor,
         )

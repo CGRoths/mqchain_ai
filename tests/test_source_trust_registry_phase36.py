@@ -140,6 +140,112 @@ def test_apply_approval_creates_registry_rows_and_is_idempotent() -> None:
         assert db.scalar(select(func.count(ApprovalEvent.id))) == 1
 
 
+def test_low_confidence_override_dry_run_does_not_mutate_db() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=70)
+
+        result = approve_candidate_groups(
+            db,
+            source_job_id=job.id,
+            allow_review_readiness="needs_review_official_low_confidence",
+            dry_run=True,
+        )
+
+        assert result["groups_scanned"] == 1
+        assert result["groups_approved"] == 1
+        assert result["override_groups_approved"] == 1
+        assert result["override_readiness_allowed"] == "needs_review_official_low_confidence"
+        assert db.scalar(select(func.count(Entity.id))) == 0
+        assert db.scalar(select(func.count(ApprovedAddress.id))) == 0
+        assert db.scalar(select(func.count(ApprovalEvent.id))) == 0
+
+
+def test_low_confidence_override_apply_approves_official_reserve_and_is_idempotent() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=70)
+
+        first = approve_candidate_groups(
+            db,
+            source_job_id=job.id,
+            allow_review_readiness="needs_review_official_low_confidence",
+            dry_run=False,
+            actor="test",
+        )
+        second = approve_candidate_groups(
+            db,
+            source_job_id=job.id,
+            allow_review_readiness="needs_review_official_low_confidence",
+            dry_run=False,
+            actor="test",
+        )
+        event = db.scalar(select(ApprovalEvent))
+
+        assert first["groups_approved"] == 1
+        assert first["override_groups_approved"] == 1
+        assert first["addresses_created"] == 1
+        assert first["roles_created"] == 1
+        assert first["evidence_linked"] == 1
+        assert second["groups_approved"] == 0
+        assert second["groups_skipped"] == 1
+        assert second["override_groups_skipped"] == 1
+        assert second["skipped_reasons"]["already_approved"] == 1
+        assert event.reason == "manual_policy_override: official low-confidence reserve/core candidate"
+        assert db.scalar(select(func.count(ApprovedAddress.id))) == 1
+        assert db.scalar(select(func.count(ApprovedAddressEvidence.id))) == 1
+
+
+def test_low_confidence_override_does_not_approve_disallowed_classes() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", suggested_role="cex_hot_wallet", confidence_initial=70)
+        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", suggested_role="cex_cold_wallet", confidence_initial=70, address="0x2222222222222222222222222222222222222222", normalized_address="0x2222222222222222222222222222222222222222")
+        _candidate(db, job, evidence_type="Validator mapping from OKX ETH staking PoR CSV", suggested_role="staking_deposit_wallet", confidence_initial=70, address="0x3333333333333333333333333333333333333333", normalized_address="0x3333333333333333333333333333333333333333")
+        _candidate(db, job, evidence_type="Official CoinEx CET staking delegator list", suggested_role="unmapped_role", confidence_initial=70, address="0x4444444444444444444444444444444444444444", normalized_address="0x4444444444444444444444444444444444444444")
+        _candidate(db, job, evidence_type="TXT explorer link list", suggested_role="wallet_address_from_explorer_link", confidence_initial=70, address="0x5555555555555555555555555555555555555555", normalized_address="0x5555555555555555555555555555555555555555")
+
+        result = approve_candidate_groups(
+            db,
+            source_job_id=job.id,
+            allow_review_readiness="needs_review_official_low_confidence",
+            dry_run=False,
+        )
+
+        assert result["groups_approved"] == 0
+        assert result["groups_skipped"] == 5
+        assert result["skipped_reasons"]["readiness_needs_review_hot_cold_wallet"] == 2
+        assert result["skipped_reasons"]["readiness_needs_review_staking_mapping"] == 1
+        assert result["skipped_reasons"]["readiness_needs_review_unmapped_official_role"] == 1
+        assert result["skipped_reasons"]["readiness_not_auto_approvable_explorer_link_only"] == 1
+        assert db.scalar(select(func.count(ApprovedAddress.id))) == 0
+
+
+def test_export_returns_override_approved_rows(tmp_path) -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=70)
+        approve_candidate_groups(
+            db,
+            source_job_id=job.id,
+            allow_review_readiness="needs_review_official_low_confidence",
+            dry_run=False,
+        )
+
+    output = tmp_path / "approved_registry.csv"
+    subprocess.run(
+        [sys.executable, "scripts/export_approved_registry.py", "--output", str(output)],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    exported = output.read_text(encoding="utf-8")
+    assert "Bybit" in exported
+    assert "cex_reserve_wallet" in exported
+
+
 def test_non_approvable_readiness_is_skipped() -> None:
     with SessionLocal() as db:
         job = _source_job(db)

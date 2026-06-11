@@ -34,6 +34,7 @@ class CandidateAuditRequest(BaseModel):
 class ApproveCandidateGroupsRequest(BaseModel):
     source_job_id: int | None = None
     approval_readiness: str | None = None
+    allow_review_readiness: str | None = None
     dry_run: bool = True
     actor: str = "system"
 
@@ -63,6 +64,7 @@ def approve_groups(payload: ApproveCandidateGroupsRequest, db: DBSession) -> dic
         db,
         source_job_id=payload.source_job_id,
         approval_readiness=payload.approval_readiness,
+        allow_review_readiness=payload.allow_review_readiness,
         dry_run=payload.dry_run,
         actor=payload.actor,
     )

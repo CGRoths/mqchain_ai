@@ -28,6 +28,14 @@ DEFAULT_APPROVABLE_READINESS = {
     "ready_for_approval_cex_reserve",
     "ready_for_approval_core_protocol",
 }
+LOW_CONFIDENCE_OVERRIDE_READINESS = "needs_review_official_low_confidence"
+LOW_CONFIDENCE_OVERRIDE_REASON = "manual_policy_override: official low-confidence reserve/core candidate"
+LOW_CONFIDENCE_OVERRIDE_ADDRESS_CLASSES = {"cex_reserve_wallet", "core_protocol_contract"}
+LOW_CONFIDENCE_OVERRIDE_SOURCE_TRUST = {
+    "official_confirmed",
+    "official_audit_confirmed",
+    "official_published_list",
+}
 
 
 @dataclass
@@ -80,6 +88,7 @@ def approve_candidate_groups(
     db: Session,
     source_job_id: int | None = None,
     approval_readiness: str | None = None,
+    allow_review_readiness: str | None = None,
     dry_run: bool = True,
     actor: str = "system",
 ) -> dict:
@@ -88,9 +97,12 @@ def approve_candidate_groups(
         "dry_run": dry_run,
         "source_job_id": source_job_id,
         "approval_readiness": approval_readiness,
+        "override_readiness_allowed": allow_review_readiness,
         "groups_scanned": len(groups),
         "groups_approved": 0,
         "groups_skipped": 0,
+        "override_groups_approved": 0,
+        "override_groups_skipped": 0,
         "addresses_created": 0,
         "roles_created": 0,
         "evidence_linked": 0,
@@ -101,7 +113,12 @@ def approve_candidate_groups(
     allowed = ({approval_readiness} & DEFAULT_APPROVABLE_READINESS) if approval_readiness else DEFAULT_APPROVABLE_READINESS
 
     for group in groups:
-        skip_reason = _skip_reason(group, allowed)
+        override_reason = _override_skip_reason(group, allow_review_readiness)
+        is_override = allow_review_readiness is not None and override_reason is None
+        skip_reason = None if is_override else _skip_reason(group, allowed)
+        if allow_review_readiness is not None and group.approval_readiness == allow_review_readiness and not is_override:
+            result["override_groups_skipped"] += 1
+            skip_reason = override_reason or skip_reason
         if skip_reason:
             result["groups_skipped"] += 1
             skipped_reasons[skip_reason] += 1
@@ -112,6 +129,8 @@ def approve_candidate_groups(
 
         if dry_run:
             result["groups_approved"] += 1
+            if is_override:
+                result["override_groups_approved"] += 1
             continue
 
         entity, entity_created = _get_or_create_entity(db, group.entity_name or "")
@@ -127,19 +146,23 @@ def approve_candidate_groups(
 
         if address_created or role_created or linked:
             result["groups_approved"] += 1
+            if is_override:
+                result["override_groups_approved"] += 1
             _record_event(
                 db,
                 approved_address.id,
                 group,
                 "approved",
                 actor,
-                "approved_candidate_group",
+                LOW_CONFIDENCE_OVERRIDE_REASON if is_override else "approved_candidate_group",
                 dry_run,
                 {"entity_created": entity_created, "address_created": address_created, "role_created": role_created, "evidence_linked": linked},
             )
             result["events_written"] += 1
         else:
             result["groups_skipped"] += 1
+            if is_override:
+                result["override_groups_skipped"] += 1
             skipped_reasons["already_approved"] += 1
 
     result["skipped_reasons"] = dict(sorted(skipped_reasons.items()))
@@ -225,6 +248,30 @@ def _skip_reason(group: CandidateGroup, allowed: set[str | None]) -> str | None:
         return "missing_address"
     if not group.suggested_role:
         return "missing_role"
+    return None
+
+
+def _override_skip_reason(group: CandidateGroup, allow_review_readiness: str | None) -> str | None:
+    if allow_review_readiness is None:
+        return "override_not_requested"
+    if allow_review_readiness != LOW_CONFIDENCE_OVERRIDE_READINESS:
+        return f"override_readiness_not_supported_{allow_review_readiness}"
+    if group.approval_readiness != allow_review_readiness:
+        return f"readiness_{group.approval_readiness}"
+    if group.address_class not in LOW_CONFIDENCE_OVERRIDE_ADDRESS_CLASSES:
+        return f"override_address_class_{group.address_class}"
+    if group.source_trust_status not in LOW_CONFIDENCE_OVERRIDE_SOURCE_TRUST:
+        return f"override_source_trust_{group.source_trust_status}"
+    if not group.entity_name:
+        return "missing_entity"
+    if not group.chain_slug or group.chain_slug == "-":
+        return "missing_chain_slug"
+    if not group.normalized_address:
+        return "missing_address"
+    if not group.suggested_role:
+        return "missing_role"
+    if sum(len(candidate.evidence) for candidate in group.candidates) < 1:
+        return "missing_evidence"
     return None
 
 
