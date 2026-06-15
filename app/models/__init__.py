@@ -13,6 +13,17 @@ from app.models.intake import (
     SourceJob,
     StagedArtifact,
 )
+from app.models.compact_label import (
+    DictionaryVersion,
+    KVIndexManifest,
+    KVIndexShard,
+    KeyPrefixDict,
+    LabelBatch,
+    LabelBatchEvidence,
+    Protocol,
+    RoleDict,
+    RoleProposal,
+)
 
 __all__ = [
     "AddressCandidate",
@@ -28,4 +39,13 @@ __all__ = [
     "SourceDocument",
     "SourceJob",
     "StagedArtifact",
+    "DictionaryVersion",
+    "KVIndexManifest",
+    "KVIndexShard",
+    "KeyPrefixDict",
+    "LabelBatch",
+    "LabelBatchEvidence",
+    "Protocol",
+    "RoleDict",
+    "RoleProposal",
 ]

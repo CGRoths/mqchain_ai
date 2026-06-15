@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -189,6 +189,11 @@ class RegistryAddress(TimestampMixin, Base):
     normalized_address: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
     entity_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     role: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    compact_prefix_code: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    address_key: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    address_type_code: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    label_batch_id: Mapped[int | None] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), ForeignKey("mq_label_batches.id"), nullable=True, index=True)
 
 
 class Entity(TimestampMixin, Base):
