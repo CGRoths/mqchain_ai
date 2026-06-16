@@ -12,10 +12,14 @@ BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 BECH32_INDEX = {char: idx for idx, char in enumerate(BECH32_ALPHABET)}
 HEX_20_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 HEX_32_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
+XDC_HEX_20_RE = re.compile(r"^xdc[a-fA-F0-9]{40}$", re.IGNORECASE)
 
 
-class AddressCodecError(ValueError):
+class KeyCodecError(ValueError):
     pass
+
+
+AddressCodecError = KeyCodecError
 
 
 @dataclass(frozen=True)
@@ -124,11 +128,20 @@ def _ensure_active_prefix(prefix: KeyPrefix) -> None:
 
 
 def _encode_payload(prefix: KeyPrefix, address: str) -> tuple[str, bytes]:
+    if address.lower().startswith("xdc") and prefix.chain_code != "xdc":
+        raise KeyCodecError("xdc_prefixed_address_requires_active_xdc_prefix")
     if prefix.codec == "evm_hex_20":
         if not HEX_20_RE.fullmatch(address):
-            raise AddressCodecError("invalid_evm_address")
+            raise KeyCodecError("invalid_evm_address")
         payload = bytes.fromhex(address[2:])
         return "0x" + payload.hex(), payload
+    if prefix.codec == "xdc_hex_20":
+        if prefix.chain_code != "xdc":
+            raise KeyCodecError("xdc_codec_requires_xdc_chain")
+        if not XDC_HEX_20_RE.fullmatch(address):
+            raise KeyCodecError("invalid_xdc_address")
+        payload = bytes.fromhex(address[3:])
+        return "xdc" + payload.hex(), payload
     if prefix.codec == "btc_base58check":
         payload = _base58check_decode(address)
         expected_version = 0x00 if prefix.address_family == "btc_p2pkh" else 0x05
@@ -174,6 +187,10 @@ def _decode_payload(prefix: KeyPrefix, payload: bytes) -> str:
         if len(payload) != 20:
             raise AddressCodecError("invalid_evm_payload_length")
         return "0x" + payload.hex()
+    if prefix.codec == "xdc_hex_20":
+        if len(payload) != 20:
+            raise AddressCodecError("invalid_xdc_payload_length")
+        return "xdc" + payload.hex()
     if prefix.codec == "btc_base58check":
         return _base58check_encode(payload)
     if prefix.codec in {"btc_bech32", "btc_bech32m"}:

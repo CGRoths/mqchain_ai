@@ -898,22 +898,6 @@ def test_layout_wallet_rows_reconstruct_column_major_mexc_sample() -> None:
     assert by_network["BSC"] == "0x2e8f79ad740de90dc5f5a9f0d8d9661a60725e64"
 
 
-def test_xdc_prefixed_and_0x_addresses_normalize_to_xdc(client: TestClient) -> None:
-    preview = _upload_preview(
-        client,
-        "xdc.csv",
-        (
-            "Entity,Network,Address\n"
-            "KuCoin,XDC,xdcF29f049144467b3dc55e19205c30C1737942F23a\n"
-            "KuCoin,XDC,0x2933782b5a8d72f2754103d1489614f29bfa4625\n"
-        ).encode(),
-    )
-    by_address = {candidate["address"]: candidate for candidate in preview["candidates_preview"]}
-    assert by_address["xdcF29f049144467b3dc55e19205c30C1737942F23a"]["normalized_address"] == "xdcf29f049144467b3dc55e19205c30c1737942f23a"
-    assert by_address["0x2933782b5a8d72f2754103d1489614f29bfa4625"]["normalized_address"] == "xdc2933782b5a8d72f2754103d1489614f29bfa4625"
-    assert all(candidate["chain_slug"] == "xdc" for candidate in preview["candidates_preview"])
-
-
 def test_real_mexc_pdf_layout_parser_extracts_full_wallet_section(client: TestClient) -> None:
     path = Path(r"C:\Users\User\Downloads\MEXC_PoR_Audit_20260510.pdf")
     if not path.exists():

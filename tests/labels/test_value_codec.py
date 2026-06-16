@@ -6,7 +6,9 @@ from app.labels.value_codec import (
     CURRENT_VALUE_LEN,
     TIMELINE_VALUE_LEN,
     CurrentLabelValue,
+    LabelValueV1,
     TimelineLabelValue,
+    TimelineValueV1,
     ValueCodecError,
     pack_current_value,
     pack_timeline_value,
@@ -66,7 +68,79 @@ def test_value_codec_rejects_wrong_lengths_and_out_of_range_fields() -> None:
                 quality_tier=1,
                 entity_id=1,
                 protocol_id=1,
-                role_id=65536,
+                role_id=32768,
+                flags=1,
+                batch_id=1,
+                valid_to_block_or_slot=1,
+                first_seen_block_or_slot=1,
+                last_seen_block_or_slot=1,
+            )
+        )
+
+
+def test_v1_values_reject_zero_batch_id() -> None:
+    with pytest.raises(ValueCodecError, match="batch_id_must_be_positive"):
+        pack_current_value(
+            LabelValueV1(
+                schema_version=1,
+                confidence_score=1,
+                label_status=1,
+                quality_tier=1,
+                entity_id=1,
+                protocol_id=1,
+                role_id=1,
+                flags=1,
+                batch_id=0,
+                first_seen_block_or_slot=1,
+                last_seen_block_or_slot=1,
+            )
+        )
+    with pytest.raises(ValueCodecError, match="batch_id_must_be_positive"):
+        pack_timeline_value(
+            TimelineValueV1(
+                schema_version=1,
+                confidence_score=1,
+                label_status=1,
+                quality_tier=1,
+                entity_id=1,
+                protocol_id=1,
+                role_id=1,
+                flags=1,
+                batch_id=0,
+                valid_to_block_or_slot=1,
+                first_seen_block_or_slot=1,
+                last_seen_block_or_slot=1,
+            )
+        )
+
+
+def test_v1_values_reject_role_ids_outside_signed_safe_db_range() -> None:
+    with pytest.raises(ValueCodecError, match="role_id_out_of_v1_signed_safe_range"):
+        pack_current_value(
+            LabelValueV1(
+                schema_version=1,
+                confidence_score=1,
+                label_status=1,
+                quality_tier=1,
+                entity_id=1,
+                protocol_id=1,
+                role_id=32768,
+                flags=1,
+                batch_id=1,
+                first_seen_block_or_slot=1,
+                last_seen_block_or_slot=1,
+            )
+        )
+    with pytest.raises(ValueCodecError, match="role_id_out_of_v1_signed_safe_range"):
+        pack_timeline_value(
+            TimelineValueV1(
+                schema_version=1,
+                confidence_score=1,
+                label_status=1,
+                quality_tier=1,
+                entity_id=1,
+                protocol_id=1,
+                role_id=32768,
                 flags=1,
                 batch_id=1,
                 valid_to_block_or_slot=1,
