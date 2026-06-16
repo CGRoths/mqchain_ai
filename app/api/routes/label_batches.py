@@ -7,7 +7,7 @@ from app.api.deps import DBSession
 from app.labels.batch_commit_service import BatchCommitError, BatchCommitOptions, BatchCommitService
 from app.labels.memory_kv_store import DEFAULT_MEMORY_KV_STORE
 from app.models.compact_label import LabelBatch, LabelBatchEvidence
-from app.schemas.label_batches import (
+from app.schemas.compact_label import (
     LabelBatchEvidenceRead,
     LabelBatchFromCandidatesRequest,
     LabelBatchOperationResponse,
