@@ -198,9 +198,13 @@ class RegistryAddress(TimestampMixin, Base):
 
 class Entity(TimestampMixin, Base):
     __tablename__ = "mq_entities"
-    __table_args__ = (UniqueConstraint("entity_name", name="uq_mq_entities_entity_name"),)
+    __table_args__ = (
+        UniqueConstraint("entity_name", name="uq_mq_entities_entity_name"),
+        UniqueConstraint("entity_slug", name="uq_mq_entities_entity_slug"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity_slug: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     entity_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     entity_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
