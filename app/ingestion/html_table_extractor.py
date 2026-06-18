@@ -3,6 +3,7 @@ from __future__ import annotations
 from html.parser import HTMLParser
 
 from app.ingestion.deployment_extractor import deployment_tables_from_structured_tables
+from app.ingestion.extractors.common import evidence_type_for_source
 
 
 class _TableHTMLParser(HTMLParser):
@@ -57,14 +58,20 @@ class _TableHTMLParser(HTMLParser):
             self._current_heading.append(data)
 
 
-def extract_html_deployment_tables(html: str, *, source_url: str | None) -> list[dict]:
+def extract_html_deployment_tables(html: str, *, source_url: str | None, final_source_type: str | None = "official_docs", evidence_type: str | None = None) -> list[dict]:
     parser = _TableHTMLParser()
     parser.feed(html)
+    safe_evidence_type = evidence_type or evidence_type_for_source(
+        final_source_type=final_source_type,
+        source_url=source_url,
+        content_type="text/html",
+        text_sample=html,
+    )
     return deployment_tables_from_structured_tables(
         parser.tables,
         source_url=source_url,
         source_input_type="docs_html_deployment_table",
-        evidence_type="official_docs_deployment",
+        evidence_type=safe_evidence_type,
         text=html,
     )
 

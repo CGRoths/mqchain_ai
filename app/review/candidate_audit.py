@@ -179,6 +179,18 @@ def classify_candidate_address_class(candidate, evidence_payload: dict | None = 
 
 
 def classify_source_trust_status(candidate, evidence_payload: dict | None = None) -> str:
+    explicit_level = _explicit_source_trust_level(candidate, evidence_payload)
+    if explicit_level:
+        return {
+            "official_verified": "official_confirmed",
+            "official_likely": "official_confirmed",
+            "manual_verified": "official_confirmed",
+            "third_party_officially_referenced": "weak_reference",
+            "third_party_audit": "weak_reference",
+            "third_party_unverified": "weak_reference",
+            "manual_unverified": "inferred",
+            "unknown": "unknown",
+        }.get(explicit_level, "unknown")
     evidence_text = _candidate_evidence_text(candidate, evidence_payload)
     role = (candidate.suggested_role or "").strip().lower()
 
@@ -215,6 +227,26 @@ def classify_source_trust_status(candidate, evidence_payload: dict | None = None
     if "fallback" in evidence_text or "inferred" in evidence_text:
         return "inferred"
     return "unknown"
+
+
+def _explicit_source_trust_level(candidate, evidence_payload: dict | None = None) -> str | None:
+    for source in (candidate.raw_reference or {}, evidence_payload or {}):
+        level = _nested_get(source, "source_trust_level")
+        if level:
+            return str(level)
+        source_trust = _nested_get(source, "source_trust")
+        if isinstance(source_trust, dict) and source_trust.get("trust_level"):
+            return str(source_trust["trust_level"])
+    return None
+
+
+def _nested_get(source: dict, key: str):
+    if key in source:
+        return source.get(key)
+    raw_reference = source.get("raw_reference")
+    if isinstance(raw_reference, dict):
+        return raw_reference.get(key)
+    return None
 
 
 def classify_approval_readiness(candidate, source_trust_status: str, address_class: str, confidence_initial: int | None, evidence_count: int) -> str:

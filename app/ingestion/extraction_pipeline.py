@@ -68,7 +68,10 @@ class ExtractionPipeline:
             "raw_row_count": len(all_raw_rows),
             "normalized_row_count": len(all_normalized_rows),
             "extractor_stats": extractor_stats,
+            "source_trust_levels": sorted({row.source_trust_level for row in all_normalized_rows if row.source_trust_level}),
+            "source_identity_confidences": [row.source_identity_confidence for row in all_normalized_rows if row.source_identity_confidence is not None],
         }
+        first_row = all_normalized_rows[0] if all_normalized_rows else None
         return ExtractionResult(
             source_documents=resolved.documents,
             raw_rows=all_raw_rows,
@@ -79,6 +82,11 @@ class ExtractionPipeline:
             fatal_errors=resolved.fatal_errors,
             extractor_stats=extractor_stats,
             metadata=metadata,
+            source_identity=first_row.source_identity if first_row else None,
+            source_trust=first_row.source_trust if first_row else None,
+            source_trust_level=first_row.source_trust_level if first_row else None,
+            source_trust_score=first_row.source_trust_score if first_row else None,
+            source_identity_confidence=first_row.source_identity_confidence if first_row else None,
         )
 
 

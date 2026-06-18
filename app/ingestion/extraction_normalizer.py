@@ -16,6 +16,9 @@ from app.ingestion.deployment_extractor import normalize_network_label
 from app.ingestion.extraction_models import NormalizedExtractedRow, RawExtractedRow
 from app.ingestion.network_normalizer import NetworkNormalizer
 from app.ingestion.protocol_profiles import ProtocolProfileRegistry
+from app.ingestion.source_identity import identity_from_profile, infer_source_identity
+from app.ingestion.source_signal_extractor import source_signals_from_raw_row
+from app.ingestion.source_trust_classifier import classify_source_trust, evidence_type_for_trust
 
 
 class ExtractionNormalizer:
@@ -32,6 +35,29 @@ class ExtractionNormalizer:
             source_file_path=raw_row.source_file_path,
             text_sample=text_sample,
             entity_hint=_raw_entity_hint(raw_row.raw_row),
+        )
+        source_signals = source_signals_from_raw_row(raw_row, text_sample=text_sample)
+        detected_identity = infer_source_identity(source_signals)
+        profile_identity = identity_from_profile(profile.entity_name, profile.protocol_name)
+        source_identity = _choose_identity(detected_identity, profile_identity)
+        source_type = _source_type_from_row(raw_row)
+        automatic_source_trust = classify_source_trust(
+            source_signals,
+            source_identity,
+            final_source_type=source_type,
+            metadata=raw_row.raw_row,
+            allow_manual_override=False,
+        )
+        source_trust = classify_source_trust(
+            source_signals,
+            source_identity,
+            final_source_type=source_type,
+            metadata=raw_row.raw_row,
+        )
+        safe_evidence_type = evidence_type_for_trust(
+            final_source_type=source_type,
+            trust=source_trust,
+            source_url=raw_row.source_url,
         )
         structured_source = _is_structured_source(raw_row.source_input_type)
         network_label = self._infer_network(raw_row)
@@ -79,11 +105,13 @@ class ExtractionNormalizer:
             role=role,
             contract_name=contract_name,
             source_input_type=raw_row.source_input_type,
-            evidence_type=raw_row.evidence_type,
+            evidence_type=safe_evidence_type,
             confidence_parser=confidence_parser,
             structured_source=structured_source,
             role_fallback_used=bool(role_meta["role_fallback_used"]),
             network_status=network_status,
+            source_trust_level=source_trust.trust_level,
+            source_trust_score=source_trust.trust_score,
         )
         warnings = list(raw_row.warnings)
         known_pipeline_network = _known_network_heading(network_label) is not None
@@ -100,6 +128,7 @@ class ExtractionNormalizer:
             "extractor_name": raw_row.extractor_name,
             "source_input_type": raw_row.source_input_type,
             "evidence_type": raw_row.evidence_type,
+            "safe_evidence_type": safe_evidence_type,
             "heading_path": raw_row.heading_path,
             "section_heading": raw_row.section_heading,
             "raw_row": raw_row.raw_row,
@@ -135,12 +164,22 @@ class ExtractionNormalizer:
             "confidence_source": raw_row.confidence_source or profile.default_confidence_source,
             "confidence_parser": confidence_parser,
             "confidence_role": confidence_role,
+            "source_signals": source_signals.to_dict(),
+            "source_identity": source_identity.to_dict() if source_identity else None,
+            "source_trust": source_trust.to_dict(),
+            "automatic_source_trust": automatic_source_trust.to_dict(),
+            "source_trust_level": source_trust.trust_level,
+            "source_trust_score": source_trust.trust_score,
+            "source_identity_confidence": source_identity.identity_confidence if source_identity else None,
             "warnings": warnings,
         }
 
+        entity_name = profile.entity_name or (source_identity.entity_name if source_identity else None)
+        protocol_name = profile.protocol_name or (source_identity.protocol_name if source_identity else None)
+
         return NormalizedExtractedRow(
-            entity_name=profile.entity_name,
-            protocol_name=profile.protocol_name,
+            entity_name=entity_name,
+            protocol_name=protocol_name,
             category=profile.category,
             sub_category=profile.sub_category,
             network=network_label,
@@ -152,7 +191,7 @@ class ExtractionNormalizer:
             wallet_label=wallet_label,
             role=role,
             label_type=label_type,
-            evidence_type=raw_row.evidence_type or "source_extraction_context",
+            evidence_type=safe_evidence_type or raw_row.evidence_type or "source_extraction_context",
             source_input_type=raw_row.source_input_type,
             source_url=raw_row.source_url,
             source_file_path=raw_row.source_file_path,
@@ -161,6 +200,11 @@ class ExtractionNormalizer:
             confidence_source=raw_row.confidence_source or profile.default_confidence_source,
             confidence_parser=confidence_parser,
             confidence_role=confidence_role,
+            source_identity=source_identity.to_dict() if source_identity else None,
+            source_trust=source_trust.to_dict(),
+            source_trust_level=source_trust.trust_level,
+            source_trust_score=source_trust.trust_score,
+            source_identity_confidence=source_identity.identity_confidence if source_identity else None,
             warnings=_dedupe(warnings),
             raw_reference=raw_reference,
         )
@@ -438,6 +482,41 @@ def _network_from_path(value: str | None) -> str | None:
     return None
 
 
+def _choose_identity(detected_identity, profile_identity):
+    if profile_identity is None:
+        return detected_identity
+    if detected_identity is None or not detected_identity.entity_slug:
+        return profile_identity
+    if detected_identity.entity_slug == profile_identity.entity_slug:
+        return detected_identity
+    if getattr(profile_identity, "identity_method", "") == "protocol_profile_enrichment":
+        return profile_identity
+    return detected_identity
+
+
+def _source_type_from_row(raw_row: RawExtractedRow) -> str | None:
+    for value in (
+        _raw_get(raw_row.raw_row, "final_source_type", "source_type", "requested_source_type"),
+        raw_row.source_input_type,
+    ):
+        if not value:
+            continue
+        text = str(value)
+        if text.startswith("github_"):
+            return "github_blob"
+        if text.startswith("docs_"):
+            return "official_docs"
+        if text.startswith("pdf_"):
+            return "pdf_url" if raw_row.source_url else "pdf_upload"
+        if text.startswith("xlsx_"):
+            return "excel_upload"
+        if text.startswith("csv_"):
+            return "csv_upload"
+    if raw_row.source_url:
+        return "official_website"
+    return None
+
+
 def _raw_get(row: dict[str, Any], *keys: str) -> str | None:
     normalized = {_normalize_key(key): key for key in row}
     for key in keys:
@@ -492,32 +571,52 @@ def _confidence_initial(
     structured_source: bool,
     role_fallback_used: bool,
     network_status: str,
+    source_trust_level: str | None,
+    source_trust_score: int | None,
 ) -> int:
+    base = None
     if structured_source and evidence_type in {"official_docs_deployment", "official_github_deployment", "source_extraction_context"}:
         if evidence_type == "official_docs_deployment" and source_input_type in {"docs_html_deployment_table", "docs_markdown_deployment_table"}:
             if network_status == "recognized" and contract_name:
-                return 95
+                base = 95
             if network_status == "missing" and contract_name:
-                return 75
-        if network_status == "recognized" and role and not role_fallback_used:
-            return 95
-        if network_status == "recognized" and role:
-            return 88
-        if network_status in {"missing", "unrecognized"} and role:
-            return 75
-        if contract_name:
-            return 65
-    if evidence_type == "official_docs_deployment" and source_input_type == "docs_html_deployment_table":
+                base = base or 75
+        if base is None and network_status == "recognized" and role and not role_fallback_used:
+            base = 95
+        if base is None and network_status == "recognized" and role:
+            base = 88
+        if base is None and network_status in {"missing", "unrecognized"} and role:
+            base = 75
+        if base is None and contract_name:
+            base = 65
+    if base is None and evidence_type == "official_docs_deployment" and source_input_type == "docs_html_deployment_table":
         if network and contract_name:
-            return 90
-        if contract_name:
-            return 75
-    score = confidence_parser
-    if network:
-        score += 5
-    if role:
-        score += 5
-    return max(0, min(100, score))
+            base = 90
+        elif contract_name:
+            base = 75
+    if base is not None:
+        score = base
+    else:
+        score = confidence_parser
+        if network:
+            score += 5
+        if role:
+            score += 5
+    score = max(0, min(100, score))
+    if source_trust_level in {"official_verified", "official_likely", "manual_verified"}:
+        return score
+    if source_trust_level == "third_party_officially_referenced":
+        return min(max(score, 80), 88)
+    if source_trust_level == "third_party_audit":
+        return min(max(score, 72), 82)
+    if source_trust_level == "third_party_unverified":
+        return min(score, 65)
+    if source_trust_level == "manual_unverified":
+        bonus = min(10, int((source_trust_score or 0) / 10))
+        return min(max(score, 55 + bonus), 75)
+    if source_trust_level == "unknown":
+        return min(score, 70 if structured_source and network and (role or contract_name) else 55)
+    return score
 
 
 def _is_long_0x(address: str) -> bool:

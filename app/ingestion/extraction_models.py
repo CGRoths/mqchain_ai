@@ -75,6 +75,11 @@ class NormalizedExtractedRow:
     confidence_source: str | int | None = None
     confidence_parser: int | None = None
     confidence_role: int | None = None
+    source_identity: dict[str, Any] | None = None
+    source_trust: dict[str, Any] | None = None
+    source_trust_level: str | None = None
+    source_trust_score: int | None = None
+    source_identity_confidence: int | None = None
     warnings: list[str] = field(default_factory=list)
     raw_reference: dict[str, Any] = field(default_factory=dict)
 
@@ -90,3 +95,8 @@ class ExtractionResult:
     fatal_errors: list[str] = field(default_factory=list)
     extractor_stats: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    source_identity: dict[str, Any] | None = None
+    source_trust: dict[str, Any] | None = None
+    source_trust_level: str | None = None
+    source_trust_score: int | None = None
+    source_identity_confidence: int | None = None

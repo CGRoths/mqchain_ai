@@ -22,10 +22,14 @@ from app.ingestion.deployment_extractor import (
     yaml_deployment_tables,
 )
 from app.ingestion.extraction_pipeline import ExtractionPipeline
+from app.ingestion.extractors.common import evidence_type_for_source
 from app.ingestion.github_source_resolver import resolve_github_source
 from app.ingestion.html_table_extractor import extract_html_deployment_tables
 from app.ingestion.intake_models import CandidatePreview, ParsedSource, SourceArtifact, SourceFingerprint
 from app.ingestion.network_normalizer import NetworkNormalizer
+from app.ingestion.source_identity import infer_source_identity
+from app.ingestion.source_signal_extractor import extract_source_signals
+from app.ingestion.source_trust_classifier import classify_source_trust, evidence_type_for_trust
 from app.ingestion.solidity_address_extractor import extract_solidity_deployment_table
 
 
@@ -342,18 +346,26 @@ class JsonYamlAdapter(SourceAdapter):
         parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content)
         if parsed is not None:
             return parsed
+        evidence_type = evidence_type_for_source(
+            final_source_type=fingerprint.final_source_type,
+            source_url=artifact.source_url,
+            source_file_path=artifact.local_file_path,
+            filename=artifact.filename,
+            content_type=artifact.content_type,
+            text_sample=text,
+        )
         tables = json_deployment_tables(
             text,
             source_url=artifact.source_url,
             source_input_type="json_deployment_registry",
-            evidence_type="official_docs_deployment" if artifact.source_url else "source_extraction_context",
+            evidence_type=evidence_type,
         )
         if not tables:
             tables = yaml_deployment_tables(
                 text,
                 source_url=artifact.source_url,
                 source_input_type="yaml_deployment_registry",
-                evidence_type="official_docs_deployment" if artifact.source_url else "source_extraction_context",
+                evidence_type=evidence_type,
             )
         if tables:
             source_input_type = (tables[0].get("metadata") or {}).get("source_input_type") or "structured_deployment_registry"
@@ -386,7 +398,7 @@ class GitHubAdapter(SourceAdapter):
         if not text and artifact.source_url:
             text = f"GitHub source: {artifact.source_url}"
 
-        tables = _github_deployment_tables(text, source_url=resolved_url or artifact.source_url)
+        tables = _github_deployment_tables(text, source_url=resolved_url or artifact.source_url, final_source_type=fingerprint.final_source_type)
         if tables:
             source_input_type = (tables[0].get("metadata") or {}).get("source_input_type") or "official_github_deployment_table"
             candidates = _extract_table_candidates(artifact, fingerprint, tables, default_source_input_type=source_input_type)
@@ -415,7 +427,7 @@ class WebDocsAdapter(SourceAdapter):
         parsed = _pipeline_parsed_source(artifact, fingerprint, raw_content, return_empty_on_static_html_warning=True)
         if parsed is not None:
             return parsed
-        tables = _web_docs_deployment_tables(text, source_url=artifact.source_url, content_type=artifact.content_type)
+        tables = _web_docs_deployment_tables(text, source_url=artifact.source_url, content_type=artifact.content_type, final_source_type=fingerprint.final_source_type)
         warnings: list[str] = []
         if tables:
             source_input_type = (tables[0].get("metadata") or {}).get("source_input_type") or "docs_deployment_table"
@@ -591,10 +603,15 @@ def adapter_by_name(adapter_name: str) -> SourceAdapter:
         raise ValueError(f"Unknown adapter: {adapter_name}") from exc
 
 
-def _github_deployment_tables(text: str, *, source_url: str | None) -> list[dict]:
+def _github_deployment_tables(text: str, *, source_url: str | None, final_source_type: str | None = None) -> list[dict]:
+    evidence_type = evidence_type_for_source(
+        final_source_type=final_source_type or "github_blob",
+        source_url=source_url,
+        text_sample=text,
+    )
     path = urlparse(source_url or "").path.lower()
     if path.endswith(".sol") or _looks_like_solidity(text):
-        tables = extract_solidity_deployment_table(text, source_url=source_url)
+        tables = extract_solidity_deployment_table(text, source_url=source_url, final_source_type=final_source_type or "github_blob", evidence_type=evidence_type)
         if tables:
             return tables
     if path.endswith((".json", ".jsonc")) or text.lstrip().startswith(("{", "[")):
@@ -602,7 +619,7 @@ def _github_deployment_tables(text: str, *, source_url: str | None) -> list[dict
             text,
             source_url=source_url,
             source_input_type="github_json_deployment_registry",
-            evidence_type="official_github_deployment",
+            evidence_type=evidence_type,
         )
         if tables:
             return tables
@@ -611,20 +628,20 @@ def _github_deployment_tables(text: str, *, source_url: str | None) -> list[dict
             text,
             source_url=source_url,
             source_input_type="github_json_deployment_registry",
-            evidence_type="official_github_deployment",
+            evidence_type=evidence_type,
         )
         if tables:
             return tables
     if _looks_like_html(text):
-        tables = extract_html_deployment_tables(text, source_url=source_url)
+        tables = extract_html_deployment_tables(text, source_url=source_url, final_source_type=final_source_type or "github_blob", evidence_type=evidence_type)
         if tables:
-            return _retag_tables(tables, source_input_type="github_markdown_deployment_table", evidence_type="official_github_deployment")
+            return _retag_tables(tables, source_input_type="github_markdown_deployment_table", evidence_type=evidence_type)
     if "|" in text:
         tables = deployment_tables_from_structured_tables(
             markdown_tables(text),
             source_url=source_url,
             source_input_type="github_markdown_deployment_table",
-            evidence_type="official_github_deployment",
+            evidence_type=evidence_type,
             text=text,
         )
         if tables:
@@ -632,9 +649,15 @@ def _github_deployment_tables(text: str, *, source_url: str | None) -> list[dict
     return []
 
 
-def _web_docs_deployment_tables(text: str, *, source_url: str | None, content_type: str | None) -> list[dict]:
+def _web_docs_deployment_tables(text: str, *, source_url: str | None, content_type: str | None, final_source_type: str | None = None) -> list[dict]:
+    evidence_type = evidence_type_for_source(
+        final_source_type=final_source_type or "official_docs",
+        source_url=source_url,
+        content_type=content_type,
+        text_sample=text,
+    )
     if _looks_like_html(text) or "html" in (content_type or "").lower():
-        tables = extract_html_deployment_tables(text, source_url=source_url)
+        tables = extract_html_deployment_tables(text, source_url=source_url, final_source_type=final_source_type or "official_docs", evidence_type=evidence_type)
         if tables:
             return tables
     if "|" in text:
@@ -642,28 +665,28 @@ def _web_docs_deployment_tables(text: str, *, source_url: str | None, content_ty
             markdown_tables(text),
             source_url=source_url,
             source_input_type="docs_markdown_deployment_table",
-            evidence_type="official_docs_deployment",
+            evidence_type=evidence_type,
             text=text,
         )
         if tables:
             return tables
     for block in _fenced_code_blocks(text):
         if _looks_like_solidity(block):
-            tables = extract_solidity_deployment_table(block, source_url=source_url)
+            tables = extract_solidity_deployment_table(block, source_url=source_url, final_source_type=final_source_type or "official_docs", evidence_type=evidence_type)
             if tables:
-                return _retag_tables(tables, source_input_type="docs_markdown_deployment_table", evidence_type="official_docs_deployment")
+                return _retag_tables(tables, source_input_type="docs_markdown_deployment_table", evidence_type=evidence_type)
         tables = json_deployment_tables(
             block,
             source_url=source_url,
             source_input_type="docs_markdown_deployment_table",
-            evidence_type="official_docs_deployment",
+            evidence_type=evidence_type,
         )
         if not tables:
             tables = yaml_deployment_tables(
                 block,
                 source_url=source_url,
                 source_input_type="docs_markdown_deployment_table",
-                evidence_type="official_docs_deployment",
+                evidence_type=evidence_type,
             )
         if tables:
             return tables
@@ -1707,7 +1730,46 @@ def _candidate_from_address(
     else:
         normalized = clean.lower() if clean.startswith("0x") else clean
     confidence = _confidence_from_value(raw_reference.get("confidence")) or (70 if raw_network else 45)
-    entity = raw_reference.get("row_entity") or _entity_from_sheet_name(source_sheet)
+    source_reference = {
+        **raw_reference,
+        "source_sheet": source_sheet,
+        "final_source_type": fingerprint.final_source_type,
+        "adapter_name": fingerprint.parser_adapter,
+        "source_url": source_url,
+        "file_path": artifact.local_file_path,
+        "filename": artifact.filename,
+    }
+    source_signals = extract_source_signals(
+        source_url=source_url,
+        source_file_path=artifact.local_file_path,
+        filename=artifact.filename,
+        content_type=artifact.content_type,
+        metadata=source_reference,
+        raw_row=source_reference,
+        text_sample=" ".join(str(value) for value in raw_reference.values() if value is not None and value != "")[:4096],
+    )
+    source_identity = infer_source_identity(source_signals)
+    automatic_source_trust = classify_source_trust(
+        source_signals,
+        source_identity,
+        final_source_type=fingerprint.final_source_type,
+        metadata=source_reference,
+        allow_manual_override=False,
+    )
+    source_trust = classify_source_trust(
+        source_signals,
+        source_identity,
+        final_source_type=fingerprint.final_source_type,
+        metadata=source_reference,
+    )
+    safe_evidence_type = _safe_candidate_evidence_type(
+        evidence_type=evidence_type,
+        fingerprint=fingerprint,
+        source_url=source_url,
+        content_type=artifact.content_type,
+        source_trust=source_trust,
+    )
+    entity = raw_reference.get("row_entity") or _entity_from_sheet_name(source_sheet) or source_identity.entity_name
     if not raw_network and source_input_type in {
         "docs_html_deployment_table",
         "docs_markdown_deployment_table",
@@ -1735,10 +1797,10 @@ def _candidate_from_address(
         source_page=source_page,
         source_url=source_url,
         file_path=artifact.local_file_path,
-        evidence_type=evidence_type,
+        evidence_type=safe_evidence_type,
         warnings=warnings,
         raw_reference={
-            **raw_reference,
+            **source_reference,
             "table_name": table_name,
             "original_value": address,
             "normalized_value": normalized,
@@ -1746,7 +1808,32 @@ def _candidate_from_address(
             "adapter_name": fingerprint.parser_adapter,
             "source_url": source_url,
             "file_path": artifact.local_file_path,
+            "source_signals": source_signals.to_dict(),
+            "source_identity": source_identity.to_dict(),
+            "source_trust": source_trust.to_dict(),
+            "automatic_source_trust": automatic_source_trust.to_dict(),
+            "source_trust_level": source_trust.trust_level,
+            "source_trust_score": source_trust.trust_score,
+            "source_identity_confidence": source_identity.identity_confidence,
         },
+    )
+
+
+def _safe_candidate_evidence_type(
+    *,
+    evidence_type: str,
+    fingerprint: SourceFingerprint,
+    source_url: str | None,
+    content_type: str | None,
+    source_trust,
+) -> str:
+    if evidence_type not in {"source_extraction_context", "official_docs_deployment", "official_github_deployment"}:
+        return evidence_type
+    return evidence_type_for_trust(
+        final_source_type=fingerprint.final_source_type,
+        trust=source_trust,
+        source_url=source_url,
+        content_type=content_type,
     )
 
 

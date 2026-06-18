@@ -5,14 +5,44 @@ from typing import Any
 
 from app.ingestion.address_utils import ADDRESS_RE
 from app.ingestion.extraction_models import RawExtractedRow, SourceDocument
+from app.ingestion.source_identity import infer_source_identity
+from app.ingestion.source_signal_extractor import extract_source_signals, source_signals_from_document
+from app.ingestion.source_trust_classifier import classify_source_trust, evidence_type_for_trust
 
 
 def evidence_type_for(document: SourceDocument) -> str:
-    if (document.final_source_type or "").startswith("github") or document.final_source_type == "official_github":
-        return "official_github_deployment"
-    if document.source_url:
-        return "official_docs_deployment"
-    return "source_extraction_context"
+    signals = source_signals_from_document(document)
+    identity = infer_source_identity(signals)
+    trust = classify_source_trust(signals, identity, final_source_type=document.final_source_type, metadata=document.metadata)
+    return evidence_type_for_trust(
+        final_source_type=document.final_source_type,
+        trust=trust,
+        source_url=document.source_url,
+        content_type=document.content_type,
+    )
+
+
+def evidence_type_for_source(
+    *,
+    final_source_type: str | None,
+    source_url: str | None,
+    source_file_path: str | None = None,
+    filename: str | None = None,
+    content_type: str | None = None,
+    text_sample: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    signals = extract_source_signals(
+        source_url=source_url,
+        source_file_path=source_file_path,
+        filename=filename,
+        content_type=content_type,
+        text_sample=text_sample,
+        metadata=metadata or {},
+    )
+    identity = infer_source_identity(signals)
+    trust = classify_source_trust(signals, identity, final_source_type=final_source_type, metadata=metadata or {})
+    return evidence_type_for_trust(final_source_type=final_source_type, trust=trust, source_url=source_url, content_type=content_type)
 
 
 def source_input_type_for(document: SourceDocument, kind: str) -> str:

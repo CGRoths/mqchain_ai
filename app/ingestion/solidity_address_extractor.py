@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from app.ingestion.deployment_extractor import deployment_table_from_rows, infer_role, network_from_source_url
+from app.ingestion.extractors.common import evidence_type_for_source
 
 
 SOLIDITY_CONSTANT_RE = re.compile(
@@ -15,7 +16,7 @@ SOLIDITY_CONSTANT_RE = re.compile(
 )
 
 
-def extract_solidity_deployment_table(text: str, *, source_url: str | None) -> list[dict]:
+def extract_solidity_deployment_table(text: str, *, source_url: str | None, final_source_type: str | None = "github_blob", evidence_type: str | None = None) -> list[dict]:
     default_network = network_from_source_url(source_url)
     rows = []
     lines = text.splitlines()
@@ -40,7 +41,12 @@ def extract_solidity_deployment_table(text: str, *, source_url: str | None) -> l
         rows,
         source_url=source_url,
         source_input_type="github_solidity_address_book",
-        evidence_type="official_github_deployment",
+        evidence_type=evidence_type
+        or evidence_type_for_source(
+            final_source_type=final_source_type,
+            source_url=source_url,
+            text_sample=text,
+        ),
         text=text,
         table_name="solidity_address_constants",
     )
