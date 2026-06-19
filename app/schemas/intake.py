@@ -15,6 +15,7 @@ class PreviewRequest(BaseModel):
     requested_source_type: str | None = None
     content_type: str | None = None
     created_by: str | None = None
+    source_evidence: dict[str, Any] | None = None
 
 
 class SaveJobRequest(BaseModel):
@@ -34,6 +35,16 @@ class CandidatePreviewRead(BaseModel):
     address_family: str | None = None
     suggested_role: str | None = None
     confidence_initial: int = 0
+    source_score: int | None = None
+    source_trust: str | None = None
+    source_identity_score: int | None = None
+    address_network_score: int | None = None
+    candidate_confidence: int | None = None
+    confidence_cap: int | None = None
+    discovery_depth: int | None = None
+    discovery_permission: str | None = None
+    approval_readiness: str | None = None
+    scoring_warnings: list[str] = Field(default_factory=list)
     status: str = "needs_review"
     source_type: str
     source_input_type: str | None = None

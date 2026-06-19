@@ -166,6 +166,26 @@ def test_storage_slot_like_candidate_does_not_get_approved() -> None:
         assert result["skipped_reasons"]["storage_slot_like_address"] == 1
 
 
+def test_scoring_readiness_blocks_auto_approval_even_with_official_evidence() -> None:
+    with SessionLocal() as db:
+        candidate = _candidate(
+            db,
+            evidence_type="official_docs_deployment",
+            raw_reference={
+                "approval_readiness": "needs_review_unverified_source",
+                "scored_source_trust": "third_party_unverified",
+                "discovery_permission": {"discovery_depth": 0, "approval_readiness": "needs_review_unverified_source"},
+            },
+        )
+
+        result = auto_approve_official_candidates(db, source_job_id=candidate.source_job_id, dry_run=False)
+        db.refresh(candidate)
+
+        assert result["approved"] == 0
+        assert candidate.status == "needs_review"
+        assert result["skipped_reasons"]["scoring_needs_review_unverified_source"] == 1
+
+
 def test_missing_role_network_or_entity_candidates_do_not_get_approved() -> None:
     with SessionLocal() as db:
         _candidate(db, entity_name=None)

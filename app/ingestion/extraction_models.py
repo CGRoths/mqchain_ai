@@ -80,6 +80,16 @@ class NormalizedExtractedRow:
     source_trust_level: str | None = None
     source_trust_score: int | None = None
     source_identity_confidence: int | None = None
+    source_score: int | None = None
+    source_identity_score: int | None = None
+    address_network_score: int | None = None
+    candidate_confidence: int | None = None
+    confidence_cap: int | None = None
+    discovery_depth: int | None = None
+    discovery_permission: str | None = None
+    approval_readiness: str | None = None
+    scoring_warnings: list[str] = field(default_factory=list)
+    scoring_metadata: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     raw_reference: dict[str, Any] = field(default_factory=dict)
 

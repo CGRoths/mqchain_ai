@@ -10,13 +10,13 @@ from app.ingestion.address_utils import (
     clean_wallet_address,
     infer_address_family,
     normalize_address,
-    valid_address_for_network,
 )
 from app.ingestion.deployment_extractor import normalize_network_label
 from app.ingestion.extraction_models import NormalizedExtractedRow, RawExtractedRow
 from app.ingestion.network_normalizer import NetworkNormalizer
 from app.ingestion.protocol_profiles import ProtocolProfileRegistry
 from app.ingestion.source_identity import identity_from_profile, infer_source_identity
+from app.ingestion.source_scoring import SourceEvidenceBlock, SourceScoringService
 from app.ingestion.source_signal_extractor import source_signals_from_raw_row
 from app.ingestion.source_trust_classifier import classify_source_trust, evidence_type_for_trust
 
@@ -24,6 +24,7 @@ from app.ingestion.source_trust_classifier import classify_source_trust, evidenc
 class ExtractionNormalizer:
     def __init__(self, profiles: ProtocolProfileRegistry | None = None) -> None:
         self.profiles = profiles or ProtocolProfileRegistry()
+        self.scoring = SourceScoringService()
 
     def normalize(self, raw_row: RawExtractedRow, *, text_sample: str = "") -> NormalizedExtractedRow | None:
         address = clean_wallet_address(raw_row.extracted_address)
@@ -62,10 +63,21 @@ class ExtractionNormalizer:
         structured_source = _is_structured_source(raw_row.source_input_type)
         network_label = self._infer_network(raw_row)
         normalized_network = NetworkNormalizer.normalize(network_label)
-        if not valid_address_for_network(address, normalized_network):
+        entity_name = profile.entity_name or (source_identity.entity_name if source_identity else None)
+        protocol_name = profile.protocol_name or (source_identity.protocol_name if source_identity else None)
+        source_evidence = _source_evidence_block(
+            raw_row,
+            source_type=source_type,
+            entity_name=entity_name,
+            protocol_name=protocol_name,
+            network_label=network_label,
+        )
+        source_score = self.scoring.score_source(source_evidence)
+        address_network_score = self.scoring.score_address_network(address, source_evidence)
+        if address_network_score.resolution.resolution_method == "no_format_match":
             return None
 
-        normalized_address = normalize_address(address, normalized_network)
+        normalized_address = address_network_score.resolution.normalized_address or normalize_address(address, normalized_network)
         address_family = infer_address_family(address)
         contract_name = _first_present(
             raw_row.extracted_contract_name,
@@ -124,6 +136,29 @@ class ExtractionNormalizer:
         if structured_source and _is_long_0x(address) and not network_label:
             warnings.append("unknown_long_0x_address_family")
 
+        conflict_penalty = 45 if address_network_score.resolution.resolution_method == "network_format_conflict" else 0
+        candidate_score = self.scoring.score_candidate(
+            source_score,
+            source_identity_score=source_score.source_identity_alignment_score,
+            address_network_score=address_network_score.address_network_score,
+            onchain_behavior_score=_optional_int(raw_row.raw_row, "onchain_behavior_score", "onchain_score") or 0,
+            review_quality_score=confidence_initial,
+            conflict_penalty=conflict_penalty,
+            evidence={
+                "entity_name": entity_name,
+                "protocol_name": protocol_name,
+                "role": role,
+                "confidence_initial": confidence_initial,
+            },
+        )
+        discovery = self.scoring.determine_discovery_permission(
+            source_score,
+            candidate_score,
+            address_network_warnings=address_network_score.warnings,
+            conflict_warnings=[warning for warning in address_network_score.warnings if "conflict" in warning],
+        )
+        scoring_warnings = _dedupe([*source_score.warnings, *address_network_score.warnings, *candidate_score.warnings, *discovery.warnings])
+
         raw_reference = {
             "extractor_name": raw_row.extractor_name,
             "source_input_type": raw_row.source_input_type,
@@ -171,11 +206,22 @@ class ExtractionNormalizer:
             "source_trust_level": source_trust.trust_level,
             "source_trust_score": source_trust.trust_score,
             "source_identity_confidence": source_identity.identity_confidence if source_identity else None,
+            "source_evidence": source_evidence.to_dict(),
+            "source_score": source_score.to_dict(),
+            "source_score_value": source_score.source_score,
+            "scored_source_trust": source_score.source_trust,
+            "source_identity_score": source_score.source_identity_alignment_score,
+            "address_network_score": address_network_score.to_dict(),
+            "address_network_score_value": address_network_score.address_network_score,
+            "candidate_confidence_score": candidate_score.to_dict(),
+            "candidate_confidence": candidate_score.candidate_confidence,
+            "confidence_cap": candidate_score.confidence_cap,
+            "discovery_permission": discovery.to_dict(),
+            "discovery_depth": discovery.discovery_depth,
+            "approval_readiness": discovery.approval_readiness,
+            "scoring_warnings": scoring_warnings,
             "warnings": warnings,
         }
-
-        entity_name = profile.entity_name or (source_identity.entity_name if source_identity else None)
-        protocol_name = profile.protocol_name or (source_identity.protocol_name if source_identity else None)
 
         return NormalizedExtractedRow(
             entity_name=entity_name,
@@ -205,11 +251,30 @@ class ExtractionNormalizer:
             source_trust_level=source_trust.trust_level,
             source_trust_score=source_trust.trust_score,
             source_identity_confidence=source_identity.identity_confidence if source_identity else None,
+            source_score=source_score.source_score,
+            source_identity_score=source_score.source_identity_alignment_score,
+            address_network_score=address_network_score.address_network_score,
+            candidate_confidence=candidate_score.candidate_confidence,
+            confidence_cap=candidate_score.confidence_cap,
+            discovery_depth=discovery.discovery_depth,
+            discovery_permission=discovery.discovery_permission,
+            approval_readiness=discovery.approval_readiness,
+            scoring_warnings=scoring_warnings,
+            scoring_metadata={
+                "source_evidence": source_evidence.to_dict(),
+                "source_score": source_score.to_dict(),
+                "address_network_score": address_network_score.to_dict(),
+                "candidate_confidence_score": candidate_score.to_dict(),
+                "discovery_permission": discovery.to_dict(),
+            },
             warnings=_dedupe(warnings),
             raw_reference=raw_reference,
         )
 
     def _infer_network(self, raw_row: RawExtractedRow) -> str | None:
+        source_evidence = raw_row.raw_row.get("source_evidence")
+        if isinstance(source_evidence, dict) and source_evidence.get("network_hint") not in {None, ""}:
+            return str(source_evidence["network_hint"])
         explicit_network = _known_or_clean_network_label(raw_row.extracted_network) or _known_or_clean_network_label(
             _raw_get(raw_row.raw_row, "Network", "Chain", "Blockchain")
         )
@@ -495,6 +560,9 @@ def _choose_identity(detected_identity, profile_identity):
 
 
 def _source_type_from_row(raw_row: RawExtractedRow) -> str | None:
+    source_evidence = raw_row.raw_row.get("source_evidence")
+    if isinstance(source_evidence, dict) and source_evidence.get("source_type"):
+        return str(source_evidence["source_type"])
     for value in (
         _raw_get(raw_row.raw_row, "final_source_type", "source_type", "requested_source_type"),
         raw_row.source_input_type,
@@ -517,6 +585,48 @@ def _source_type_from_row(raw_row: RawExtractedRow) -> str | None:
     return None
 
 
+def _source_evidence_block(
+    raw_row: RawExtractedRow,
+    *,
+    source_type: str | None,
+    entity_name: str | None,
+    protocol_name: str | None,
+    network_label: str | None,
+) -> SourceEvidenceBlock:
+    explicit = raw_row.raw_row.get("source_evidence")
+    source_evidence = dict(explicit) if isinstance(explicit, dict) else {}
+    extra_context = source_evidence.get("extra_context") if isinstance(source_evidence.get("extra_context"), dict) else {}
+    return SourceEvidenceBlock(
+        source_url=_first_present(source_evidence.get("source_url"), raw_row.source_url),
+        source_name=_first_present(source_evidence.get("source_name"), _raw_get(raw_row.raw_row, "source_name", "Source Name")),
+        source_type=_first_present(source_evidence.get("source_type"), source_type),
+        entity_hint=_first_present(source_evidence.get("entity_hint"), entity_name, _raw_entity_hint(raw_row.raw_row)),
+        protocol_hint=_first_present(source_evidence.get("protocol_hint"), protocol_name),
+        network_hint=source_evidence.get("network_hint") if source_evidence.get("network_hint") not in {None, ""} else network_label,
+        uploaded_filename=_first_present(
+            source_evidence.get("uploaded_filename"),
+            _raw_get(raw_row.raw_row, "uploaded_filename", "filename", "source_file_name"),
+            Path(raw_row.source_file_path or "").name if raw_row.source_file_path else None,
+        ),
+        sheet_name=_first_present(source_evidence.get("sheet_name"), _raw_get(raw_row.raw_row, "source_sheet", "sheet_name")),
+        table_name=_first_present(source_evidence.get("table_name"), raw_row.table_name),
+        heading=_first_present(source_evidence.get("heading"), raw_row.section_heading, " > ".join(raw_row.heading_path)),
+        source_url_domain=_first_present(source_evidence.get("source_url_domain"), _raw_get(raw_row.raw_row, "source_url_domain")),
+        retrieved_at=_first_present(source_evidence.get("retrieved_at"), _raw_get(raw_row.raw_row, "retrieved_at")),
+        manual_verification=_first_present(source_evidence.get("manual_verification"), _raw_get(raw_row.raw_row, "manual_verification")),
+        operator_notes=_first_present(source_evidence.get("operator_notes"), _raw_get(raw_row.raw_row, "operator_notes", "notes")),
+        extra_context={
+            **extra_context,
+            "source_document_key": raw_row.source_document_key,
+            "source_file_path": raw_row.source_file_path,
+            "raw_row": raw_row.raw_row,
+            "heading_path": raw_row.heading_path,
+            "section_heading": raw_row.section_heading,
+            "table_name": raw_row.table_name,
+        },
+    )
+
+
 def _raw_get(row: dict[str, Any], *keys: str) -> str | None:
     normalized = {_normalize_key(key): key for key in row}
     for key in keys:
@@ -533,6 +643,16 @@ def _raw_get_any(row: dict[str, Any], *keys: str) -> Any | None:
         if actual is not None and row.get(actual) not in {None, ""}:
             return row.get(actual)
     return None
+
+
+def _optional_int(row: dict[str, Any], *keys: str) -> int | None:
+    value = _raw_get_any(row, *keys)
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _raw_entity_hint(row: dict[str, Any]) -> str | None:

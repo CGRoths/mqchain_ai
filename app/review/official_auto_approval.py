@@ -91,6 +91,9 @@ def _skip_reason(candidate: AddressCandidate) -> str | None:
         return "blocked_role"
     if candidate.confidence_initial < 90:
         return "confidence_below_90"
+    scoring_reason = _scoring_skip_reason(candidate)
+    if scoring_reason:
+        return scoring_reason
     if not candidate.evidence:
         return "missing_evidence"
     if not _has_official_evidence(candidate):
@@ -101,6 +104,24 @@ def _skip_reason(candidate: AddressCandidate) -> str | None:
         return "blocked_source_metadata"
     if candidate.suggested_role == "token_contract" and _relations_only(candidate):
         return "relation_token_contract"
+    return None
+
+
+def _scoring_skip_reason(candidate: AddressCandidate) -> str | None:
+    raw = candidate.raw_reference or {}
+    readiness = raw.get("approval_readiness")
+    if readiness and readiness not in {"auto_ready_official_verified", "approved"}:
+        return f"scoring_{readiness}"
+    discovery = raw.get("discovery_permission")
+    if isinstance(discovery, dict):
+        readiness = discovery.get("approval_readiness")
+        if readiness and readiness not in {"auto_ready_official_verified", "approved"}:
+            return f"scoring_{readiness}"
+        if int(discovery.get("discovery_depth") or 0) <= 0:
+            return "scoring_discovery_depth_0"
+    source_trust = raw.get("scored_source_trust") or raw.get("source_trust_level")
+    if source_trust in {"third_party_unverified", "manual_unverified", "unknown"}:
+        return f"scoring_untrusted_source_{source_trust}"
     return None
 
 

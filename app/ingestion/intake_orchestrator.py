@@ -44,6 +44,7 @@ class IntakeOrchestrator:
         requested_source_type: str | None = None,
         content_type: str | None = None,
         created_by: str | None = None,
+        source_evidence: dict | None = None,
     ) -> dict:
         raw_content = (pasted_text or "").encode("utf-8")
         final_url = source_url
@@ -69,6 +70,7 @@ class IntakeOrchestrator:
             size_bytes=len(raw_content),
             requested_source_type=requested_source_type,
             created_by=created_by,
+            source_evidence=source_evidence or {},
         )
         preview = self._build_preview(
             artifact,
@@ -88,6 +90,7 @@ class IntakeOrchestrator:
         content_type: str | None,
         requested_source_type: str | None = None,
         created_by: str | None = None,
+        source_evidence: dict | None = None,
     ) -> dict:
         staged = self._stage_artifact(
             filename=filename,
@@ -104,6 +107,7 @@ class IntakeOrchestrator:
             size_bytes=len(content),
             requested_source_type=requested_source_type,
             created_by=created_by,
+            source_evidence=source_evidence or {},
         )
         preview = self._build_preview(artifact, content, staged_artifact_id=staged.id)
         self._persist_preview(preview)
@@ -149,6 +153,7 @@ class IntakeOrchestrator:
         content_type: str | None,
         requested_source_type: str | None = None,
         created_by: str | None = None,
+        source_evidence: dict | None = None,
     ) -> SourceJob:
         preview = self.preview_upload(
             filename=filename,
@@ -156,6 +161,7 @@ class IntakeOrchestrator:
             content_type=content_type,
             requested_source_type=requested_source_type,
             created_by=created_by,
+            source_evidence=source_evidence,
         )
         return self.save_job_from_preview(
             preview_id=preview["preview_id"],
@@ -203,6 +209,7 @@ class IntakeOrchestrator:
                     "adapter_name": job.adapter_name,
                     "preview_id": job.preview_id,
                     "staged_artifact_id": job.staged_artifact_id,
+                    "source_evidence": (artifact.source_evidence or {}),
                 },
             )
             self.db.add(source_document)
@@ -384,6 +391,7 @@ class IntakeOrchestrator:
             size_bytes=len(content),
             requested_source_type=job.requested_source_type,
             created_by=data.get("created_by") or job.created_by,
+            source_evidence=dict(data.get("source_evidence") or {}),
         )
 
     @staticmethod

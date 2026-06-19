@@ -470,11 +470,30 @@ def _unknown_chain_for_match(match: AddressFormatMatch) -> str | None:
 def _network_from_context(source_context: dict[str, Any]) -> Any:
     values = " ".join(_flatten_context(source_context))
     normalized = re.sub(r"[^a-z0-9]+", " ", values.lower())
-    for key in sorted(NetworkNormalizer.NETWORKS, key=len, reverse=True):
-        key_norm = re.sub(r"[^a-z0-9]+", " ", key.lower()).strip()
-        if key_norm and re.search(rf"(?<![a-z0-9]){re.escape(key_norm)}(?![a-z0-9])", normalized):
+    keys = sorted(NetworkNormalizer.NETWORKS, key=len, reverse=True)
+    has_specific_match = any(_context_key_matches(key, normalized) for key in keys if key not in GENERIC_CONTEXT_NETWORK_KEYS)
+    for key in keys:
+        if has_specific_match and key in GENERIC_CONTEXT_NETWORK_KEYS:
+            continue
+        if _context_key_matches(key, normalized):
             return NetworkNormalizer.normalize(key)
     return None
+
+
+GENERIC_CONTEXT_NETWORK_KEYS = {
+    "erc20",
+    "eth",
+    "eth erc20",
+    "ethereum evm",
+    "ethereum evm masked",
+    "ethereum mainnet",
+    "mainnet",
+}
+
+
+def _context_key_matches(key: str, normalized_context: str) -> bool:
+    key_norm = re.sub(r"[^a-z0-9]+", " ", key.lower()).strip()
+    return bool(key_norm and re.search(rf"(?<![a-z0-9]){re.escape(key_norm)}(?![a-z0-9])", normalized_context))
 
 
 def _flatten_context(value: Any) -> list[str]:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -44,6 +46,7 @@ async def preview_upload(
     file: UploadFile = File(...),
     requested_source_type: str | None = Form(default=None),
     created_by: str | None = Form(default=None),
+    source_evidence_json: str | None = Form(default=None),
 ) -> dict:
     content = await file.read()
     try:
@@ -53,6 +56,7 @@ async def preview_upload(
             content_type=file.content_type,
             requested_source_type=requested_source_type,
             created_by=created_by,
+            source_evidence=_parse_source_evidence(source_evidence_json),
         )
     except IntakeError as exc:
         raise HTTPException(status_code=400, detail={"fatal_errors": exc.fatal_errors}) from exc
@@ -76,6 +80,7 @@ async def save_upload_job(
     file: UploadFile = File(...),
     requested_source_type: str | None = Form(default=None),
     created_by: str | None = Form(default=None),
+    source_evidence_json: str | None = Form(default=None),
 ):
     content = await file.read()
     try:
@@ -85,9 +90,22 @@ async def save_upload_job(
             content_type=file.content_type,
             requested_source_type=requested_source_type,
             created_by=created_by,
+            source_evidence=_parse_source_evidence(source_evidence_json),
         )
     except IntakeError as exc:
         raise HTTPException(status_code=400, detail={"fatal_errors": exc.fatal_errors}) from exc
+
+
+def _parse_source_evidence(value: str | None) -> dict | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail={"fatal_errors": ["source_evidence_json_invalid"]}) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail={"fatal_errors": ["source_evidence_json_must_be_object"]})
+    return parsed
 
 
 @api_router.post("/jobs/{source_job_id}/run", response_model=RunExtractionResponse)

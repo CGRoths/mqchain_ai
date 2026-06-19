@@ -135,6 +135,9 @@ def _enrich_raw_row_from_document(raw_row: RawExtractedRow, document) -> None:
         value = metadata.get(source)
         if value not in {None, ""}:
             raw_row.raw_row.setdefault(target, value)
+    source_evidence = metadata.get("source_evidence")
+    if isinstance(source_evidence, dict) and source_evidence:
+        raw_row.raw_row.setdefault("source_evidence", source_evidence)
 
 
 def _static_html_table_not_detected(document, stats: dict[str, dict], raw_rows: list[RawExtractedRow]) -> bool:

@@ -231,12 +231,26 @@ def classify_source_trust_status(candidate, evidence_payload: dict | None = None
 
 def _explicit_source_trust_level(candidate, evidence_payload: dict | None = None) -> str | None:
     for source in (candidate.raw_reference or {}, evidence_payload or {}):
+        scored_level = _nested_get(source, "scored_source_trust")
+        if scored_level:
+            return str(scored_level)
         level = _nested_get(source, "source_trust_level")
         if level:
             return str(level)
         source_trust = _nested_get(source, "source_trust")
         if isinstance(source_trust, dict) and source_trust.get("trust_level"):
             return str(source_trust["trust_level"])
+    return None
+
+
+def _explicit_approval_readiness(candidate) -> str | None:
+    raw = candidate.raw_reference or {}
+    readiness = raw.get("approval_readiness")
+    if readiness:
+        return str(readiness)
+    discovery = raw.get("discovery_permission")
+    if isinstance(discovery, dict) and discovery.get("approval_readiness"):
+        return str(discovery["approval_readiness"])
     return None
 
 
@@ -250,6 +264,9 @@ def _nested_get(source: dict, key: str):
 
 
 def classify_approval_readiness(candidate, source_trust_status: str, address_class: str, confidence_initial: int | None, evidence_count: int) -> str:
+    explicit_readiness = _explicit_approval_readiness(candidate)
+    if explicit_readiness:
+        return explicit_readiness
     if not candidate.entity_name:
         return "invalid_missing_entity"
     if not candidate.source_network:
@@ -401,15 +418,24 @@ APPROVAL_READINESS_RANK = {
     "invalid_missing_role": 0,
     "invalid_missing_address": 0,
     "invalid_missing_evidence": 0,
+    "blocked_conflict": 0,
+    "blocked_missing_network": 0,
+    "extract_only_low_confidence": 0,
     "not_auto_approvable_unknown": 1,
     "not_auto_approvable_explorer_link_only": 1,
+    "needs_review_unverified_source": 1,
     "needs_review_generic_wallet": 2,
+    "needs_review_third_party_audit": 2,
+    "needs_review_third_party_official_reference": 2,
+    "needs_review_manual_verified": 2,
     "needs_review_unmapped_official_role": 3,
+    "needs_review_official_likely": 3,
     "needs_review_hot_cold_wallet": 4,
     "needs_review_staking_mapping": 5,
     "needs_review_official_low_confidence": 6,
     "ready_for_approval_core_protocol": 7,
     "ready_for_approval_cex_reserve": 7,
+    "auto_ready_official_verified": 8,
 }
 
 

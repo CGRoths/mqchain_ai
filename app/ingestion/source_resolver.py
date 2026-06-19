@@ -70,6 +70,7 @@ class SourceResolver:
                 "requested_source_type": artifact.requested_source_type,
                 "final_source_type": fingerprint.final_source_type,
                 "adapter_name": fingerprint.parser_adapter,
+                "source_evidence": artifact.source_evidence or {},
             },
         )
         return ResolvedSourceSet(
@@ -151,6 +152,7 @@ def _resolved_github_directory(artifact: SourceArtifact, fingerprint: SourceFing
                 "inferred_network": inferred_network,
                 "inferred_market": inferred_market,
                 "root_deployment_scan_mode": crawler_metadata.get("root_deployment_scan_mode", False),
+                "source_evidence": artifact.source_evidence or {},
             },
         )
         documents.append(document)
