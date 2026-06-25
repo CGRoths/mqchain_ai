@@ -10,6 +10,7 @@ from app.models.intake import (
     IntakePreview,
     RegistryAddress,
     SourceDocument,
+    SourceVerification,
     SourceJob,
     StagedArtifact,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "IntakePreview",
     "RegistryAddress",
     "SourceDocument",
+    "SourceVerification",
     "SourceJob",
     "StagedArtifact",
 ]

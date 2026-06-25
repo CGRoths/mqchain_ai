@@ -45,7 +45,8 @@ def test_docs_table_rows_inherit_nearest_network_heading() -> None:
     assert len(result.normalized_rows) == 2
     assert {row.network for row in result.normalized_rows} == {"Base"}
     assert all("missing_network" not in row.warnings for row in result.normalized_rows)
-    assert all(row.confidence_initial == 95 for row in result.normalized_rows)
+    assert all(row.source_trust_level == "third_party_unverified" for row in result.normalized_rows)
+    assert all(row.confidence_initial == 65 for row in result.normalized_rows)
     assert all(row.raw_reference["section_heading"] == "Base" for row in result.normalized_rows)
 
 
@@ -100,7 +101,8 @@ def test_docs_unresolved_network_rows_are_preserved_with_missing_network_warning
     assert row.network is None
     assert row.role == "some_contract"
     assert "missing_network" in row.warnings
-    assert row.confidence_initial == 75
+    assert row.source_trust_level == "third_party_unverified"
+    assert row.confidence_initial == 65
 
 
 def test_docs_unknown_section_heading_is_carried_as_unrecognized_network() -> None:

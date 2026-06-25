@@ -181,6 +181,32 @@ class AddressEvidence(TimestampMixin, Base):
     source_document = relationship("SourceDocument", back_populates="evidence")
 
 
+class SourceVerification(TimestampMixin, Base):
+    __tablename__ = "mq_source_verifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_job_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_jobs.id"), nullable=True, index=True)
+    source_document_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_documents.id"), nullable=True, index=True)
+    candidate_id: Mapped[int | None] = mapped_column(ForeignKey("mq_address_candidates.id"), nullable=True, index=True)
+    candidate_group_key: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    entity_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    protocol_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_origin: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    official_referrer_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_method: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    evidence_shape: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    verification_scope: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    verification_status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_trust: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    verified_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verification_evidence_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class RegistryAddress(TimestampMixin, Base):
     __tablename__ = "mq_address_registry"
 

@@ -37,7 +37,7 @@ def _artifact(source_url: str | None, *, input_method: str = "url", filename: st
     )
 
 
-def test_generic_docs_source_infers_identity_and_official_likely_without_profile() -> None:
+def test_generic_docs_source_infers_identity_without_official_trust() -> None:
     html = """
     <html><body>
       <h1>ExampleProtocol Deployments</h1>
@@ -60,8 +60,8 @@ def test_generic_docs_source_infers_identity_and_official_likely_without_profile
     assert row.entity_name.lower() == "exampleprotocol"
     assert row.protocol_name.lower() == "exampleprotocol"
     assert row.category == "unknown"
-    assert row.source_trust_level == "official_likely"
-    assert row.evidence_type == "official_docs_deployment"
+    assert row.source_trust_level == "third_party_unverified"
+    assert row.evidence_type == "docs_deployment_source"
     assert row.raw_reference["source_identity"]["identity_method"] == "multi_signal_identity"
 
 
@@ -101,8 +101,8 @@ def test_fake_third_party_with_known_protocol_name_is_not_official_evidence() ->
     candidate = result.candidates_preview[0]
     assert candidate.entity_name == "Aave"
     assert candidate.status == "needs_review"
-    assert candidate.evidence_type in {"third_party_reference", "url_source_context"}
-    assert candidate.evidence_type != "official_docs_deployment"
+    assert candidate.evidence_type == "docs_deployment_source"
+    assert not candidate.evidence_type.startswith("official_")
     assert candidate.raw_reference["source_trust_level"] == "third_party_unverified"
 
 
@@ -140,7 +140,7 @@ def test_uploaded_excel_gets_identity_from_filename_and_sheet_but_not_official_t
     candidate = parsed.candidates[0]
     assert candidate.entity_name == "Binance"
     assert candidate.status == "needs_review"
-    assert candidate.evidence_type == "uploaded_file_context"
+    assert candidate.evidence_type == "excel_wallet_list"
     assert candidate.raw_reference["source_trust_level"] == "manual_unverified"
     assert candidate.raw_reference["source_identity"]["entity_slug"] == "binance"
     assert candidate.confidence_initial != 45
@@ -166,7 +166,7 @@ def test_third_party_officially_referenced_is_not_official_verified() -> None:
         filename="exampleprotocol-por.pdf",
         text_sample="ExampleProtocol proof of reserves audit",
         metadata={"official_source_outbound_urls": [source_url]},
-    ) == "audit_or_por_document"
+    ) == "pdf_por_document"
 
 
 def test_review_audit_honors_explicit_third_party_trust_before_text_heuristics() -> None:
@@ -181,7 +181,36 @@ def test_review_audit_honors_explicit_third_party_trust_before_text_heuristics()
         }
         evidence = []
 
-    assert classify_source_trust_status(Candidate()) == "weak_reference"
+    assert classify_source_trust_status(Candidate()) == "official_reference"
+
+
+def test_source_verification_metadata_is_required_for_exchange_reported_trust() -> None:
+    source_url = "https://coinmarketcap.com/exchanges/indodax/"
+    signals = extract_source_signals(
+        source_url=source_url,
+        filename="indodax_reserves.xlsx",
+        text_sample="Indodax exchange wallet list",
+        metadata={},
+    )
+    identity = infer_source_identity(signals)
+
+    unverified = classify_source_trust(signals, identity, final_source_type="excel_upload", metadata={})
+    verified = classify_source_trust(
+        signals,
+        identity,
+        final_source_type="excel_upload",
+        metadata={
+            "source_verification": {
+                "verification_status": "verified",
+                "source_trust": "third_party_exchange_reported",
+                "verified_by": "analyst",
+                "verified_at": "2026-06-26T00:00:00Z",
+            }
+        },
+    )
+
+    assert unverified.trust_level != "third_party_exchange_reported"
+    assert verified.trust_level == "third_party_exchange_reported"
 
 
 def _xlsx_bytes(sheet_name: str, rows: list[list[str]]) -> bytes:

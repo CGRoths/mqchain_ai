@@ -13,10 +13,12 @@ TRUST_LEVELS = {
     "official_likely",
     "third_party_officially_referenced",
     "third_party_audit",
+    "third_party_exchange_reported",
     "third_party_unverified",
     "manual_verified",
     "manual_unverified",
     "unknown",
+    "rejected",
 }
 GITHUB_TYPES = {"github_blob", "github_raw", "github_directory", "official_github"}
 UPLOAD_TYPES = {"csv_upload", "excel_upload", "pdf_upload", "manual_seed", "plain_text"}
@@ -63,19 +65,23 @@ def evidence_type_for_trust(
     source_type = (final_source_type or "").strip().lower()
     content = (content_type or "").strip().lower()
     if source_type in AUDIT_TYPES or "pdf" in content:
-        return "audit_or_por_document"
-    if source_type in {"csv_upload", "excel_upload", "pdf_upload", "manual_seed", "plain_text"} and not source_url:
-        return "uploaded_file_context"
+        return "pdf_por_document"
+    if source_type == "csv_upload":
+        return "csv_wallet_list"
+    if source_type == "excel_upload":
+        return "excel_wallet_list"
+    if source_type in {"manual_seed", "plain_text"}:
+        return "manual_seed_context"
+    if source_type == "pdf_upload":
+        return "pdf_por_document"
     if source_type in GITHUB_TYPES:
-        return "official_github_deployment" if trust.trust_level in {"official_verified", "official_likely", "manual_verified"} else "github_deployment_source"
-    if source_type == "official_docs" and trust.trust_level in {"official_verified", "official_likely", "manual_verified"}:
-        return "official_docs_deployment"
-    if source_type == "official_website" and trust.trust_level in {"official_verified", "official_likely", "manual_verified"}:
-        return "official_website_claim"
-    if trust.trust_level == "third_party_officially_referenced":
-        return "third_party_reference"
+        return "github_deployment_source"
+    if source_type == "official_docs":
+        return "docs_deployment_source"
+    if source_type == "official_website":
+        return "docs_deployment_source"
     if source_url:
-        return "third_party_reference" if trust.trust_level.startswith("third_party") else "url_source_context"
+        return "third_party_reserve_page" if trust.trust_level.startswith("third_party") else "url_source_context"
     return "source_extraction_context"
 
 
@@ -86,6 +92,9 @@ def _automatic_trust(
     metadata: dict[str, Any],
 ) -> SourceTrustClassification:
     matched: list[str] = []
+    verified = _verified_trust_from_metadata(metadata)
+    if verified is not None:
+        return verified
     if _is_officially_referenced(signals, metadata):
         return SourceTrustClassification(
             trust_level="third_party_officially_referenced",
@@ -102,14 +111,15 @@ def _automatic_trust(
             official_status="not_official",
             matched_signals=["manual_upload"],
         )
-    if source_type in AUDIT_TYPES or _has_audit_hint(signals):
-        level = "third_party_audit" if signals.source_url else "manual_unverified"
+    if source_type in AUDIT_TYPES:
+        level = "third_party_unverified" if signals.source_url else "manual_unverified"
         return SourceTrustClassification(
             trust_level=level,
-            trust_score=72 if level == "third_party_audit" else 55,
-            trust_method="audit_or_por_source",
-            official_status="third_party" if level == "third_party_audit" else "manual_unverified",
-            matched_signals=["audit_or_por_hint"],
+            trust_score=55 if level == "third_party_unverified" else 45,
+            trust_method="unverified_audit_or_por_source",
+            official_status=level,
+            matched_signals=["audit_or_por_shape"],
+            warnings=["audit_or_por_shape_is_not_source_trust"],
         )
     if identity and identity.entity_slug:
         root_label = (signals.root_domain or "").split(".")[0]
@@ -119,15 +129,6 @@ def _automatic_trust(
             matched.append("github_org_matches_identity")
         if signals.github_repo and identity.entity_slug in _tokenish(signals.github_repo):
             matched.append("github_repo_matches_identity")
-        if matched and (signals.source_url or source_type in GITHUB_TYPES):
-            score = 80 + min(15, identity.identity_confidence // 8)
-            return SourceTrustClassification(
-                trust_level="official_likely",
-                trust_score=min(95, score),
-                trust_method="source_identity_agreement",
-                official_status="likely_official",
-                matched_signals=matched,
-            )
         if signals.source_url:
             return SourceTrustClassification(
                 trust_level="third_party_unverified",
@@ -135,6 +136,7 @@ def _automatic_trust(
                 trust_method="third_party_identity_mention",
                 official_status="third_party_unverified",
                 matched_signals=identity.matched_signals,
+                warnings=["identity_alignment_is_not_source_trust"],
             )
     if signals.source_url:
         return SourceTrustClassification(
@@ -151,7 +153,7 @@ def _manual_override(metadata: dict[str, Any], automatic: SourceTrustClassificat
     if metadata.get("manual_trust_override") is not True:
         return None
     requested = str(metadata.get("manual_trust_level") or "").strip()
-    if requested not in {"manual_verified", "third_party_officially_referenced"}:
+    if requested not in {"manual_verified", "third_party_officially_referenced", "third_party_audit", "third_party_exchange_reported", "official_verified"}:
         return SourceTrustClassification(
             trust_level=automatic.trust_level,
             trust_score=automatic.trust_score,
@@ -160,14 +162,22 @@ def _manual_override(metadata: dict[str, Any], automatic: SourceTrustClassificat
             matched_signals=automatic.matched_signals,
             warnings=[*automatic.warnings, "manual_trust_override_invalid_or_ignored"],
         )
-    score = 90 if requested == "manual_verified" else 82
+    if not metadata.get("manual_verified_by"):
+        return SourceTrustClassification(
+            trust_level=automatic.trust_level,
+            trust_score=automatic.trust_score,
+            trust_method=automatic.trust_method,
+            official_status=automatic.official_status,
+            matched_signals=automatic.matched_signals,
+            warnings=[*automatic.warnings, "manual_trust_override_missing_verified_by"],
+        )
+    score = 95 if requested == "official_verified" else 90 if requested == "manual_verified" else 82
     return SourceTrustClassification(
         trust_level=requested,
         trust_score=score,
         trust_method="manual_trust_override",
-        official_status="manual_verified" if requested == "manual_verified" else "referenced_third_party",
+        official_status=requested,
         matched_signals=["manual_trust_override"],
-        warnings=[] if metadata.get("manual_verified_by") else ["manual_verified_by_missing"],
     )
 
 
@@ -197,16 +207,35 @@ def _is_officially_referenced(signals: SourceSignals, metadata: dict[str, Any]) 
     return bool(source_host and any(urlparse(ref).netloc.lower().removeprefix("www.") == source_host for ref in references))
 
 
-def _has_audit_hint(signals: SourceSignals) -> bool:
-    text = " ".join(
-        [
-            signals.filename or "",
-            signals.document_title or "",
-            " ".join(signals.url_path_tokens),
-            " ".join(signals.text_tokens[:80]),
-        ]
-    ).lower()
-    return any(token in text for token in {"audit", "audited", "por", "proof reserve", "proof of reserve", "proof of reserves"})
+def _verified_trust_from_metadata(metadata: dict[str, Any]) -> SourceTrustClassification | None:
+    verification = metadata.get("source_verification")
+    if not isinstance(verification, dict):
+        return None
+    trust = str(verification.get("source_trust") or "").strip()
+    status = str(verification.get("verification_status") or "").strip()
+    if trust not in TRUST_LEVELS:
+        return None
+    if status == "rejected" or trust == "rejected":
+        return SourceTrustClassification("rejected", 0, "source_verification_record", "rejected", matched_signals=["source_verification"], warnings=["source_rejected"])
+    if status not in {"verified", "approved", "active"}:
+        return None
+    if not verification.get("verified_by") or not verification.get("verified_at"):
+        return None
+    score = {
+        "official_verified": 98,
+        "official_likely": 90,
+        "third_party_officially_referenced": 86,
+        "third_party_exchange_reported": 84,
+        "third_party_audit": 82,
+        "manual_verified": 80,
+    }.get(trust, 55)
+    return SourceTrustClassification(
+        trust_level=trust,
+        trust_score=score,
+        trust_method="source_verification_record",
+        official_status=trust,
+        matched_signals=["source_verification"],
+    )
 
 
 def _tokenish(value: str) -> set[str]:

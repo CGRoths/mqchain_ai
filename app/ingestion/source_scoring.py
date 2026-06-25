@@ -14,10 +14,12 @@ SOURCE_TRUST_CAPS = {
     "official_likely": 92,
     "third_party_officially_referenced": 88,
     "third_party_audit": 82,
+    "third_party_exchange_reported": 84,
     "manual_verified": 80,
     "third_party_unverified": 55,
     "manual_unverified": 45,
     "unknown": 35,
+    "rejected": 0,
 }
 
 OFFICIAL_SOURCE_TYPES = {
@@ -27,7 +29,7 @@ OFFICIAL_SOURCE_TYPES = {
     "official_github",
 }
 GITHUB_SOURCE_TYPES = {"github_blob", "github_raw", "github_directory", "official_github", "third_party_github"}
-AUDIT_SOURCE_TYPES = {"audit_report", "por_report", "por_pdf", "pdf_url", "pdf", "audit_or_por_document"}
+AUDIT_SOURCE_TYPES = {"audit_report", "por_report", "por_pdf", "pdf_url", "pdf", "audit_or_por_document", "pdf_por_document", "pdf_audit_table"}
 MANUAL_SOURCE_TYPES = {"manual_paste", "manual_seed", "plain_text", "csv_upload", "excel_upload", "pdf_upload", "unknown"}
 STRONG_MANUAL_VERIFICATIONS = {"checked", "official_checked", "manually_verified", "manual_verified"}
 
@@ -152,7 +154,7 @@ class SourceScoringService:
         if not evidence.source_url and manual_verification not in STRONG_MANUAL_VERIFICATIONS:
             warnings.append("source_url_missing_caps_trust")
         if source_type in OFFICIAL_SOURCE_TYPES and trust not in {"official_verified", "official_likely", "manual_verified"}:
-            warnings.append("official_source_type_not_verified_by_identity")
+            warnings.append("official_source_type_is_not_source_trust_without_verification")
 
         return SourceScoreResult(
             source_score=source_score,
@@ -277,7 +279,7 @@ class SourceScoringService:
         confidence = candidate_score.candidate_confidence
         if trust == "official_verified" and confidence >= 90:
             return DiscoveryPermissionResult(3, "trusted_seed_expansion", True, True, False, "official_verified_high_confidence", "auto_ready_official_verified", warnings)
-        if trust in {"official_likely", "third_party_officially_referenced"} and confidence >= 80:
+        if trust in {"official_likely", "third_party_officially_referenced", "third_party_exchange_reported"} and confidence >= 80:
             readiness = "needs_review_official_likely" if trust == "official_likely" else "needs_review_third_party_official_reference"
             return DiscoveryPermissionResult(2, "review_gated_cluster_expansion", False, True, True, trust, readiness, warnings)
         if trust == "third_party_audit" and confidence >= 75:
@@ -411,21 +413,35 @@ def _source_trust(
     github_org_match: bool,
     manual_verification: str,
 ) -> str:
+    verified = _verified_trust_from_extra_context(evidence.extra_context)
+    if verified:
+        return verified
     if manual_verification == "official_checked" and (official_domain_match or github_org_match):
         return "official_verified"
-    if source_type in OFFICIAL_SOURCE_TYPES and (official_domain_match or github_org_match):
-        return "official_likely"
     if manual_verification in {"manually_verified", "manual_verified", "checked", "official_checked"}:
         return "manual_verified"
-    if source_type in AUDIT_SOURCE_TYPES:
-        return "third_party_audit" if domain else "manual_unverified"
-    if source_type in GITHUB_SOURCE_TYPES and github_org_match:
-        return "official_likely"
     if domain:
         return "third_party_unverified"
     if source_type in MANUAL_SOURCE_TYPES:
         return "manual_unverified"
     return "unknown"
+
+
+def _verified_trust_from_extra_context(extra_context: dict[str, Any]) -> str | None:
+    verification = extra_context.get("source_verification")
+    if not isinstance(verification, dict):
+        return None
+    trust = str(verification.get("source_trust") or "").strip()
+    status = str(verification.get("verification_status") or "").strip()
+    if trust not in SOURCE_TRUST_CAPS:
+        return None
+    if status == "rejected" or trust == "rejected":
+        return "rejected"
+    if status not in {"verified", "approved", "active"}:
+        return None
+    if not verification.get("verified_by") or not verification.get("verified_at"):
+        return None
+    return trust
 
 
 def _identity_alignment_score(evidence: SourceEvidenceBlock, domain: str | None) -> tuple[int, dict[str, Any]]:

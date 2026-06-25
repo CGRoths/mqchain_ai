@@ -143,7 +143,7 @@ def test_normalizer_handles_sablier_heading_network() -> None:
     assert normalized.sub_category == "streaming_payments"
     assert normalized.network == "Abstract"
     assert normalized.role == "protocol_contract"
-    assert normalized.evidence_type == "official_docs_deployment"
+    assert normalized.evidence_type == "docs_deployment_source"
     assert normalized.raw_reference["heading_path"] == ["Deployments", "Abstract"]
 
 
@@ -167,6 +167,7 @@ def test_normalizer_infers_compound_network_from_file_path() -> None:
     assert normalized.category == "lending"
     assert normalized.network == "Base"
     assert normalized.role == "lending_market"
+    assert normalized.evidence_type == "github_deployment_source"
     assert normalized.raw_reference["source_file_path"] == "deployments/base/usdc/configuration.json"
 
 
@@ -183,7 +184,7 @@ def test_candidate_preview_factory_preserves_shape_and_dedupes() -> None:
         contract_name="Comet",
         role="lending_market",
         label_type="lending_market",
-        evidence_type="official_github_deployment",
+        evidence_type="github_deployment_source",
         source_input_type="github_json_deployment_registry",
         source_url="https://github.com/compound-finance/comet/tree/main/deployments/base/usdc",
         source_file_path="deployments/base/usdc/configuration.json",

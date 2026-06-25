@@ -13,7 +13,9 @@ from app.review.candidate_audit import (
     classify_approval_readiness,
     classify_candidate_address_class,
     classify_source_trust_status,
+    source_trust_status_from_trust_level,
 )
+from app.review.source_verification import VERIFIED_STATUSES, find_source_verification_for_candidate, source_verification_payload, verification_gate_for_candidate
 from app.models.intake import (
     AddressCandidate,
     ApprovalEvent,
@@ -34,8 +36,9 @@ LOW_CONFIDENCE_OVERRIDE_REASON = "manual_policy_override: official low-confidenc
 LOW_CONFIDENCE_OVERRIDE_ADDRESS_CLASSES = {"cex_reserve_wallet", "core_protocol_contract"}
 LOW_CONFIDENCE_OVERRIDE_SOURCE_TRUST = {
     "official_confirmed",
-    "official_audit_confirmed",
-    "official_published_list",
+    "official_reference",
+    "exchange_reported",
+    "third_party_audit",
 }
 
 HOT_COLD_OVERRIDE_READINESS = "needs_review_hot_cold_wallet"
@@ -43,8 +46,8 @@ HOT_COLD_OVERRIDE_REASON = "manual_policy_override: official hot/cold wallet can
 HOT_COLD_OVERRIDE_ADDRESS_CLASSES = {"cex_hot_wallet", "cex_cold_wallet"}
 HOT_COLD_OVERRIDE_SOURCE_TRUST = {
     "official_confirmed",
-    "official_audit_confirmed",
-    "official_published_list",
+    "official_reference",
+    "exchange_reported",
 }
 SUPPORTED_OVERRIDE_POLICIES = {
     LOW_CONFIDENCE_OVERRIDE_READINESS: {
@@ -99,7 +102,7 @@ def get_unique_candidate_groups(db: Session, source_job_id: int | None = None, a
 
     groups: list[CandidateGroup] = []
     for key, candidates in grouped.items():
-        group = _candidate_group(key, candidates)
+        group = _candidate_group(db, key, candidates)
         if approval_readiness and group.approval_readiness != approval_readiness:
             continue
         groups.append(group)
@@ -137,7 +140,12 @@ def approve_candidate_groups(
     for group in groups:
         override_reason = _override_skip_reason(group, allow_review_readiness)
         is_override = allow_review_readiness is not None and override_reason is None
-        skip_reason = None if is_override else _skip_reason(group, allowed)
+        override_policy = SUPPORTED_OVERRIDE_POLICIES.get(allow_review_readiness or "")
+        skip_reason = (
+            _override_verification_skip_reason(db, group, override_policy["source_trust"])
+            if is_override and override_policy
+            else _skip_reason(db, group, allowed)
+        )
         if allow_review_readiness is not None and group.approval_readiness == allow_review_readiness and not is_override:
             result["override_groups_skipped"] += 1
             skip_reason = override_reason or skip_reason
@@ -195,10 +203,10 @@ def approve_candidate_groups(
     return result
 
 
-def _candidate_group(key: str, candidates: list[AddressCandidate]) -> CandidateGroup:
+def _candidate_group(db: Session, key: str, candidates: list[AddressCandidate]) -> CandidateGroup:
     representative = candidates[0]
     address_class = classify_candidate_address_class(representative, _first_evidence_payload(representative))
-    source_trust_status = _best_source_trust(candidates)
+    source_trust_status = _best_source_trust(db, candidates)
     readiness = _best_approval_readiness(candidates, source_trust_status, address_class)
     return CandidateGroup(
         group_key=key,
@@ -214,9 +222,13 @@ def _candidate_group(key: str, candidates: list[AddressCandidate]) -> CandidateG
 
 
 SOURCE_TRUST_RANK = {
+    "rejected": -1,
     "unknown": 0,
     "inferred": 1,
     "weak_reference": 2,
+    "third_party_audit": 3,
+    "official_reference": 3,
+    "exchange_reported": 3,
     "official_but_unmapped_role": 3,
     "official_published_list": 4,
     "official_staking_mapping": 5,
@@ -250,13 +262,26 @@ APPROVAL_READINESS_RANK = {
 }
 
 
-def _best_source_trust(candidates: list[AddressCandidate]) -> str:
+def _best_source_trust(db: Session, candidates: list[AddressCandidate]) -> str:
     best = "unknown"
     for candidate in candidates:
-        trust = classify_source_trust_status(candidate, _first_evidence_payload(candidate))
+        trust = _verified_source_trust_status(db, candidate) or classify_source_trust_status(candidate, _first_evidence_payload(candidate))
         if SOURCE_TRUST_RANK.get(trust, 0) > SOURCE_TRUST_RANK.get(best, 0):
             best = trust
     return best
+
+
+def _verified_source_trust_status(db: Session, candidate: AddressCandidate) -> str | None:
+    verification = find_source_verification_for_candidate(db, candidate)
+    if verification is None:
+        return None
+    if verification.verification_status == "rejected" or verification.source_trust == "rejected":
+        return "rejected"
+    if verification.verification_status not in VERIFIED_STATUSES:
+        return None
+    if not verification.verified_by or not verification.verified_at:
+        return None
+    return source_trust_status_from_trust_level(verification.source_trust)
 
 
 def _best_approval_readiness(candidates: list[AddressCandidate], source_trust_status: str, address_class: str) -> str:
@@ -268,7 +293,7 @@ def _best_approval_readiness(candidates: list[AddressCandidate], source_trust_st
     return best
 
 
-def _skip_reason(group: CandidateGroup, allowed: set[str | None]) -> str | None:
+def _skip_reason(db: Session, group: CandidateGroup, allowed: set[str | None]) -> str | None:
     if group.approval_readiness not in allowed:
         return f"readiness_{group.approval_readiness}"
     if not group.entity_name:
@@ -279,6 +304,34 @@ def _skip_reason(group: CandidateGroup, allowed: set[str | None]) -> str | None:
         return "missing_address"
     if not group.suggested_role:
         return "missing_role"
+    verification_reason = _verification_skip_reason(db, group)
+    if verification_reason:
+        return verification_reason
+    return None
+
+
+def _verification_skip_reason(db: Session, group: CandidateGroup) -> str | None:
+    for candidate in group.candidates:
+        gate = verification_gate_for_candidate(db, candidate)
+        if not gate.allowed:
+            return gate.reason or "source_verification_not_allowed"
+    return None
+
+
+def _override_verification_skip_reason(db: Session, group: CandidateGroup, allowed_source_trust: set[str]) -> str | None:
+    for candidate in group.candidates:
+        verification = find_source_verification_for_candidate(db, candidate)
+        if verification is None:
+            return "missing_source_verification"
+        if verification.verification_status == "rejected" or verification.source_trust == "rejected":
+            return "source_verification_rejected"
+        if verification.verification_status not in VERIFIED_STATUSES:
+            return "source_verification_not_verified"
+        if not verification.verified_by or not verification.verified_at:
+            return "source_verification_incomplete"
+        trust_status = _verified_source_trust_status(db, candidate)
+        if trust_status not in allowed_source_trust:
+            return f"override_source_trust_{trust_status or 'unknown'}"
     return None
 
 
@@ -348,7 +401,15 @@ def _get_or_create_approved_address(db: Session, entity: Entity, group: Candidat
         approval_readiness_at_approval=group.approval_readiness,
         confidence_score=max(candidate.confidence_initial for candidate in group.candidates),
         status="approved",
-        metadata_json={"candidate_group_key": group.group_key, "candidate_count": len(group.candidates)},
+        metadata_json={
+            "candidate_group_key": group.group_key,
+            "candidate_count": len(group.candidates),
+            "source_verifications": [
+                source_verification_payload(verification_gate_for_candidate(db, candidate).verification)
+                for candidate in group.candidates
+            ],
+            "approval_policy_version": "source_verification_v1",
+        },
     )
     db.add(approved)
     db.flush()

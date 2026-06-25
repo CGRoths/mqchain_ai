@@ -117,7 +117,7 @@ def test_compound_directory_json_extraction_preserves_market_roles_and_json_path
     for candidate in result.candidates_preview:
         assert candidate.entity_name == "Compound"
         assert candidate.source_network == "Base"
-        assert candidate.evidence_type == "official_github_deployment"
+        assert candidate.evidence_type == "github_deployment_source"
         assert candidate.file_path == "deployments/base/usdc/configuration.json"
         assert candidate.raw_reference["market"] == "USDC"
         assert candidate.raw_reference["github_owner"] == "compound-finance"

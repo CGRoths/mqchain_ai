@@ -13,6 +13,7 @@ from app.db.database import Base, SessionLocal, engine, init_db
 from app.main import app
 from app.models.intake import AddressCandidate, AddressEvidence, IntakePreview, SourceDocument, SourceJob
 from app.review.official_auto_approval import auto_approve_official_candidates
+from app.review.source_verification import record_source_verification
 
 
 @pytest.fixture(autouse=True)
@@ -29,9 +30,10 @@ def client() -> TestClient:
         yield test_client
 
 
-def test_official_github_deployment_candidate_gets_approved() -> None:
+def test_verified_github_deployment_candidate_gets_approved() -> None:
     with SessionLocal() as db:
-        candidate = _candidate(db, evidence_type="official_github_deployment", source_input_type="github_json_deployment_registry")
+        candidate = _candidate(db, evidence_type="github_deployment_source", source_input_type="github_json_deployment_registry")
+        _verify_candidate(db, candidate, source_trust="official_verified")
 
         result = auto_approve_official_candidates(db, source_job_id=candidate.source_job_id, dry_run=False)
         db.refresh(candidate)
@@ -40,7 +42,19 @@ def test_official_github_deployment_candidate_gets_approved() -> None:
         assert result["approved"] == 1
         assert candidate.status == "approved"
         assert candidate.approved_at is not None
-        assert candidate.approval_method == "official_source_auto_approval"
+        assert candidate.approval_method == "source_verification_auto_approval"
+
+
+def test_official_evidence_type_without_source_verification_is_blocked() -> None:
+    with SessionLocal() as db:
+        candidate = _candidate(db, evidence_type="official_github_deployment", source_input_type="github_json_deployment_registry")
+
+        result = auto_approve_official_candidates(db, source_job_id=candidate.source_job_id, dry_run=False)
+        db.refresh(candidate)
+
+        assert result["approved"] == 0
+        assert candidate.status == "needs_review"
+        assert result["skipped_reasons"]["missing_source_verification"] == 1
 
 
 def test_por_audit_candidate_gets_approved() -> None:
@@ -48,10 +62,11 @@ def test_por_audit_candidate_gets_approved() -> None:
         candidate = _candidate(
             db,
             source_type="por_pdf",
-            evidence_type="audited_wallet",
+            evidence_type="pdf_por_document",
             source_input_type="pdf_audited_wallet_table",
             suggested_role="cex_por_wallet",
         )
+        _verify_candidate(db, candidate, source_trust="third_party_audit")
 
         result = auto_approve_official_candidates(db, source_job_id=candidate.source_job_id, dry_run=False)
         db.refresh(candidate)
@@ -65,10 +80,11 @@ def test_sablier_official_docs_candidate_gets_approved() -> None:
         candidate = _candidate(
             db,
             entity_name="Sablier",
-            evidence_type="official_docs_deployment",
+            evidence_type="docs_deployment_source",
             source_input_type="docs_html_deployment_table",
             suggested_role="protocol_contract",
         )
+        _verify_candidate(db, candidate, source_trust="official_verified")
 
         result = auto_approve_official_candidates(db, source_job_id=candidate.source_job_id, dry_run=False)
         db.refresh(candidate)
@@ -82,12 +98,13 @@ def test_compound_configuration_candidate_gets_approved() -> None:
         candidate = _candidate(
             db,
             entity_name="Compound",
-            evidence_type="official_github_deployment",
+            evidence_type="github_deployment_source",
             source_input_type="github_json_deployment_registry",
             suggested_role="lending_market",
             file_path="deployments/base/usdc/configuration.json",
             raw_reference={"contract_name": "comet", "market": "USDC"},
         )
+        _verify_candidate(db, candidate, source_trust="official_verified")
 
         result = auto_approve_official_candidates(db, source_job_id=candidate.source_job_id, dry_run=False)
         db.refresh(candidate)
@@ -170,7 +187,7 @@ def test_scoring_readiness_blocks_auto_approval_even_with_official_evidence() ->
     with SessionLocal() as db:
         candidate = _candidate(
             db,
-            evidence_type="official_docs_deployment",
+            evidence_type="docs_deployment_source",
             raw_reference={
                 "approval_readiness": "needs_review_unverified_source",
                 "scored_source_trust": "third_party_unverified",
@@ -203,6 +220,7 @@ def test_missing_role_network_or_entity_candidates_do_not_get_approved() -> None
 def test_dry_run_writes_nothing_and_apply_is_idempotent() -> None:
     with SessionLocal() as db:
         candidate = _candidate(db)
+        _verify_candidate(db, candidate, source_trust="official_verified")
 
         dry = auto_approve_official_candidates(db, source_job_id=candidate.source_job_id, dry_run=True)
         db.refresh(candidate)
@@ -221,6 +239,7 @@ def test_dry_run_writes_nothing_and_apply_is_idempotent() -> None:
 def test_auto_approve_official_api_endpoint(client: TestClient) -> None:
     with SessionLocal() as db:
         candidate = _candidate(db)
+        _verify_candidate(db, candidate, source_trust="official_verified")
         source_job_id = candidate.source_job_id
 
     dry = client.post("/api/review/auto-approve-official", json={"source_job_id": source_job_id, "dry_run": True})
@@ -237,7 +256,7 @@ def _candidate(
     db,
     *,
     source_type: str = "github_directory",
-    evidence_type: str = "official_github_deployment",
+    evidence_type: str = "github_deployment_source",
     source_input_type: str = "github_json_deployment_registry",
     entity_name: str | None = "Compound",
     source_network: str | None = "Base",
@@ -300,6 +319,25 @@ def _candidate(
     db.commit()
     db.refresh(candidate)
     return candidate
+
+
+def _verify_candidate(db, candidate: AddressCandidate, *, source_trust: str) -> None:
+    record_source_verification(
+        db,
+        verification_scope="candidate",
+        verification_status="verified",
+        source_trust=source_trust,
+        verified_by="pytest",
+        source_job_id=candidate.source_job_id,
+        source_document_id=candidate.source_document_id,
+        candidate_id=candidate.id,
+        entity_name=candidate.entity_name,
+        source_url=candidate.source_url,
+        input_method=candidate.source_type,
+        evidence_shape=candidate.evidence_type,
+        verification_reason="test fixture",
+    )
+    db.commit()
 
 
 def _source_job(db) -> SourceJob:

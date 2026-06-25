@@ -14,6 +14,7 @@ from app.ingestion.network_normalizer import NetworkNormalizer
 from app.main import app
 from app.models.intake import AddressCandidate, AddressEvidence, IntakePreview, SourceDocument, SourceJob
 from app.review.candidate_audit import audit_candidates, classify_candidate_address_class
+from app.review.source_verification import record_source_verification
 
 
 @pytest.fixture(autouse=True)
@@ -100,8 +101,10 @@ def test_missing_fields_evidence_and_duplicates_are_counted() -> None:
 def test_auto_approvable_preview_does_not_mutate_db() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        core = _candidate(db, job, suggested_role="lending_market", evidence_type="official_github_deployment", source_input_type="github_json_deployment_registry")
-        reserve = _candidate(db, job, suggested_role="cex_por_wallet", source_type="por_pdf", evidence_type="audited_wallet", source_input_type="pdf_audited_wallet_table")
+        core = _candidate(db, job, suggested_role="lending_market", evidence_type="github_deployment_source", source_input_type="github_json_deployment_registry")
+        reserve = _candidate(db, job, suggested_role="cex_por_wallet", source_type="por_pdf", evidence_type="pdf_por_document", source_input_type="pdf_audited_wallet_table")
+        _verify_candidate(db, core, source_trust="official_verified")
+        _verify_candidate(db, reserve, source_trust="third_party_audit")
         _candidate(db, job, suggested_role="cex_hot_wallet", evidence_type="audited_wallet", source_input_type="xlsx_multi_sheet_registry")
         _candidate(db, job, suggested_role="wallet_address_from_explorer_link", evidence_type="source_extraction_context")
 
@@ -130,7 +133,8 @@ def test_relation_dependency_and_low_confidence_buckets() -> None:
             source_input_type="github_typescript_relation_map",
             raw_reference={"ownership_boundary": "external_or_related"},
         )
-        _candidate(db, job, suggested_role="cex_por_wallet", confidence_initial=60)
+        low = _candidate(db, job, suggested_role="cex_por_wallet", confidence_initial=60)
+        _verify_candidate(db, low, source_trust="third_party_audit")
 
         report = audit_candidates(db, source_job_id=job.id)
 
@@ -207,11 +211,14 @@ def test_refined_review_buckets_and_no_mutation() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
         reserve = _candidate(db, job, suggested_role="cex_por_wallet", confidence_initial=60)
-        hacken_reserve = _candidate(db, job, suggested_role="cex_por_wallet", evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=60)
+        hacken_reserve = _candidate(db, job, suggested_role="cex_por_wallet", evidence_type="pdf_por_document", confidence_initial=60)
         hot = _candidate(db, job, suggested_role="cex_hot_wallet", confidence_initial=60)
         cold = _candidate(db, job, suggested_role="cex_cold_wallet", confidence_initial=60)
         explorer = _candidate(db, job, suggested_role="wallet_address_from_explorer_link", confidence_initial=60)
         unknown = _candidate(db, job, suggested_role="mystery_role", confidence_initial=95)
+        _verify_candidate(db, reserve, source_trust="third_party_audit")
+        _verify_candidate(db, hacken_reserve, source_trust="third_party_audit")
+        _verify_candidate(db, unknown, source_trust="official_verified")
         before = {candidate.id: candidate.status for candidate in [reserve, hacken_reserve, hot, cold, explorer, unknown]}
 
         report = audit_candidates(db, source_job_id=job.id)
@@ -309,6 +316,25 @@ def _candidate(
     db.commit()
     db.refresh(candidate)
     return candidate
+
+
+def _verify_candidate(db, candidate: AddressCandidate, *, source_trust: str) -> None:
+    record_source_verification(
+        db,
+        verification_scope="candidate",
+        verification_status="verified",
+        source_trust=source_trust,
+        verified_by="pytest",
+        source_job_id=candidate.source_job_id,
+        source_document_id=candidate.source_document_id,
+        candidate_id=candidate.id,
+        entity_name=candidate.entity_name,
+        source_url=candidate.source_url,
+        input_method=candidate.source_type,
+        evidence_shape=candidate.evidence_type,
+        verification_reason="test fixture",
+    )
+    db.commit()
 
 
 def _source_job(db) -> SourceJob:

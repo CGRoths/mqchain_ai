@@ -43,7 +43,8 @@ def test_aave_risk_steward_uses_structured_role_fallback() -> None:
     assert row.network == "Ethereum"
     assert row.contract_name == "RISK_STEWARD"
     assert row.role == "risk_steward"
-    assert row.confidence_initial >= 85
+    assert row.source_trust_level == "third_party_unverified"
+    assert row.confidence_initial < 90
     assert row.raw_reference["role_fallback_used"] is True
     assert row.raw_reference["role_fallback_source"] == "contract_name"
     assert row.raw_reference["original_role_text"] == "RISK_STEWARD"

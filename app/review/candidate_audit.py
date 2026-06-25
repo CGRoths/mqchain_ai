@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.ingestion.network_normalizer import NetworkNormalizer
 from app.models.intake import AddressCandidate, AddressEvidence
-from app.review.official_auto_approval import OFFICIAL_EVIDENCE_TYPES
+from app.review.source_verification import VERIFIED_STATUSES, find_source_verification_for_candidate, verification_gate_for_candidate
 
 
 CORE_PROTOCOL_ROLES = {
@@ -23,11 +23,6 @@ CORE_PROTOCOL_ROLES = {
     "rewards_contract",
     "router_contract",
     "treasury",
-}
-OFFICIAL_CORE_EVIDENCE_TYPES = {
-    *OFFICIAL_EVIDENCE_TYPES,
-    "official_github_deployment",
-    "official_docs_deployment",
 }
 
 
@@ -58,7 +53,7 @@ def audit_candidates(db: Session, source_job_id: int | None = None, limit_sample
             missing_evidence_count += 1
         address_class = classify_candidate_address_class(candidate, _first_evidence_payload(candidate))
         chain_slug = _candidate_chain_slug(candidate)
-        source_trust_status = classify_source_trust_status(candidate, _first_evidence_payload(candidate))
+        source_trust_status = _verified_source_trust_status(db, candidate) or classify_source_trust_status(candidate, _first_evidence_payload(candidate))
         approval_readiness = classify_approval_readiness(
             candidate,
             source_trust_status,
@@ -67,7 +62,7 @@ def audit_candidates(db: Session, source_job_id: int | None = None, limit_sample
             evidence_count,
         )
         review_bucket = approval_readiness
-        if approval_readiness.startswith("ready_for_approval"):
+        if (approval_readiness.startswith("ready_for_approval") or approval_readiness == "auto_ready_official_verified") and verification_gate_for_candidate(db, candidate).allowed:
             auto_approvable_count += 1
         elif approval_readiness.startswith("needs_review"):
             needs_review_count += 1
@@ -171,7 +166,7 @@ def classify_candidate_address_class(candidate, evidence_payload: dict | None = 
         return "staking_withdrawal_wallet"
     if role == "wallet_address_from_explorer_link":
         return "explorer_link_only"
-    if candidate.evidence_type in OFFICIAL_CORE_EVIDENCE_TYPES and role in CORE_PROTOCOL_ROLES:
+    if role in CORE_PROTOCOL_ROLES:
         return "core_protocol_contract"
     if "wallet" in role:
         return "generic_wallet"
@@ -181,56 +176,46 @@ def classify_candidate_address_class(candidate, evidence_payload: dict | None = 
 def classify_source_trust_status(candidate, evidence_payload: dict | None = None) -> str:
     explicit_level = _explicit_source_trust_level(candidate, evidence_payload)
     if explicit_level:
-        return {
-            "official_verified": "official_confirmed",
-            "official_likely": "official_confirmed",
-            "manual_verified": "official_confirmed",
-            "third_party_officially_referenced": "weak_reference",
-            "third_party_audit": "weak_reference",
-            "third_party_unverified": "weak_reference",
-            "manual_unverified": "inferred",
-            "unknown": "unknown",
-        }.get(explicit_level, "unknown")
+        return source_trust_status_from_trust_level(explicit_level) or "unknown"
     evidence_text = _candidate_evidence_text(candidate, evidence_payload)
-    role = (candidate.suggested_role or "").strip().lower()
-
-    if "hacken proof of reserves audit pdf" in evidence_text:
-        return "official_audit_confirmed"
-    if "official binance por hotcold csv" in evidence_text:
-        return "official_confirmed"
-    if "validator mapping from okx eth staking por csv" in evidence_text:
-        return "official_staking_mapping"
-    if "okx eth staking por csv" in evidence_text:
-        return "official_staking_mapping"
-    if "official coinex eth staking validator mapping" in evidence_text:
-        return "official_staking_mapping"
-    if "official coinex cet staking delegator list" in evidence_text:
-        return "official_staking_mapping" if role in {"staking_deposit_wallet", "staking_withdrawal_wallet"} else "official_but_unmapped_role"
-    if "deribit public reserve-address list" in evidence_text:
-        return "official_published_list"
-    if "huobi / htx por csv signed address evidence" in evidence_text:
-        return "official_confirmed"
-    if "bitmex token reserves yaml" in evidence_text:
-        return "official_confirmed"
-    if "coinmarketcap exchange reserves page / reported directly by exchange" in evidence_text:
-        return "official_published_list"
-    if "txt explorer link list" in evidence_text:
-        return "weak_reference"
-    if candidate.evidence_type in OFFICIAL_CORE_EVIDENCE_TYPES:
-        return "official_confirmed"
-    if "official" in evidence_text and "staking" in evidence_text:
-        return "official_staking_mapping"
-    if "official" in evidence_text:
-        return "official_confirmed"
-    if any(marker in evidence_text for marker in ("proof of reserves", "por", "audit", "audited", "hacken")):
-        return "official_audit_confirmed"
     if "fallback" in evidence_text or "inferred" in evidence_text:
         return "inferred"
     return "unknown"
 
 
+def source_trust_status_from_trust_level(trust_level: str | None) -> str | None:
+    return {
+        "official_verified": "official_confirmed",
+        "official_likely": "official_confirmed",
+        "manual_verified": "official_confirmed",
+        "third_party_officially_referenced": "official_reference",
+        "third_party_exchange_reported": "exchange_reported",
+        "third_party_audit": "third_party_audit",
+        "third_party_unverified": "weak_reference",
+        "manual_unverified": "inferred",
+        "unknown": "unknown",
+        "rejected": "rejected",
+    }.get(str(trust_level or "").strip())
+
+
+def _verified_source_trust_status(db: Session, candidate: AddressCandidate) -> str | None:
+    verification = find_source_verification_for_candidate(db, candidate)
+    if verification is None:
+        return None
+    if verification.verification_status == "rejected" or verification.source_trust == "rejected":
+        return "rejected"
+    if verification.verification_status not in VERIFIED_STATUSES:
+        return None
+    if not verification.verified_by or not verification.verified_at:
+        return None
+    return source_trust_status_from_trust_level(verification.source_trust)
+
+
 def _explicit_source_trust_level(candidate, evidence_payload: dict | None = None) -> str | None:
     for source in (candidate.raw_reference or {}, evidence_payload or {}):
+        verification = _nested_get(source, "source_verification")
+        if isinstance(verification, dict) and verification.get("source_trust"):
+            return str(verification["source_trust"])
         scored_level = _nested_get(source, "scored_source_trust")
         if scored_level:
             return str(scored_level)
@@ -279,19 +264,19 @@ def classify_approval_readiness(candidate, source_trust_status: str, address_cla
         return "invalid_missing_evidence"
     if address_class == "explorer_link_only":
         return "not_auto_approvable_explorer_link_only"
-    official = _is_trusted_official_status(source_trust_status)
+    ready_trust = _is_ready_trust_for_address_class(source_trust_status, address_class)
     if address_class == "unknown_candidate":
-        return "needs_review_unmapped_official_role" if official else "not_auto_approvable_unknown"
+        return "needs_review_unmapped_official_role" if ready_trust else "not_auto_approvable_unknown"
     if address_class in {"staking_deposit_wallet", "staking_withdrawal_wallet"}:
         return "needs_review_staking_mapping"
     if address_class in {"cex_hot_wallet", "cex_cold_wallet"}:
         return "needs_review_hot_cold_wallet"
     score = int(confidence_initial or 0)
-    if address_class == "cex_reserve_wallet" and official:
+    if address_class == "cex_reserve_wallet" and ready_trust:
         return "ready_for_approval_cex_reserve" if score >= 85 else "needs_review_official_low_confidence"
-    if address_class == "core_protocol_contract" and official:
+    if address_class == "core_protocol_contract" and ready_trust:
         return "ready_for_approval_core_protocol" if score >= 85 else "needs_review_official_low_confidence"
-    if address_class == "generic_wallet" and official:
+    if address_class == "generic_wallet" and ready_trust:
         return "needs_review_generic_wallet"
     return "needs_review_generic_wallet"
 
@@ -302,29 +287,22 @@ def _review_bucket(candidate: AddressCandidate, address_class: str) -> str:
 
 
 def _is_official_enough(candidate: AddressCandidate) -> bool:
-    evidence_types = {candidate.evidence_type, *(evidence.evidence_type for evidence in candidate.evidence)}
-    if evidence_types & OFFICIAL_CORE_EVIDENCE_TYPES:
-        return True
-    if "audited_wallet" in evidence_types:
-        return True
-    evidence_text = " ".join(str(evidence_type or "").lower() for evidence_type in evidence_types)
-    if any(marker in evidence_text for marker in ("proof of reserves", "por", "audit", "audited", "hacken")):
-        return True
-    return (
-        candidate.source_type == "por_pdf"
-        and candidate.source_input_type == "pdf_audited_wallet_table"
-        and "audited_wallet" in evidence_types
-    )
+    return classify_source_trust_status(candidate, _first_evidence_payload(candidate)) == "official_confirmed"
 
 
 def _is_trusted_official_status(source_trust_status: str) -> bool:
     return source_trust_status in {
         "official_confirmed",
-        "official_audit_confirmed",
-        "official_published_list",
-        "official_staking_mapping",
-        "official_but_unmapped_role",
+        "exchange_reported",
     }
+
+
+def _is_ready_trust_for_address_class(source_trust_status: str, address_class: str) -> bool:
+    if address_class == "cex_reserve_wallet":
+        return source_trust_status in {"official_confirmed", "official_reference", "exchange_reported", "third_party_audit"}
+    if address_class == "core_protocol_contract":
+        return source_trust_status == "official_confirmed"
+    return _is_trusted_official_status(source_trust_status)
 
 
 def _candidate_evidence_text(candidate, evidence_payload: dict | None = None) -> str:
@@ -403,9 +381,13 @@ def _group_sample(key: tuple[str | None, str | None, str | None, str | None, str
 
 
 SOURCE_TRUST_RANK = {
+    "rejected": -1,
     "unknown": 0,
     "inferred": 1,
     "weak_reference": 2,
+    "third_party_audit": 3,
+    "official_reference": 3,
+    "exchange_reported": 3,
     "official_but_unmapped_role": 3,
     "official_published_list": 4,
     "official_staking_mapping": 5,

@@ -267,7 +267,7 @@ def test_uniswap_docs_deployment_table_preview_save_run_evidence(client: TestCli
     assert len(candidates) == 4
     assert {candidate["suggested_role"] for candidate in candidates} == {"factory_contract", "router_contract"}
     assert {candidate["source_network"] for candidate in candidates} == {"Ethereum", "Arbitrum"}
-    assert all(candidate["evidence_type"] == "official_docs_deployment" for candidate in candidates)
+    assert all(candidate["evidence_type"] == "docs_deployment_source" for candidate in candidates)
     assert all(candidate["status"] == "needs_review" for candidate in candidates)
 
     job = client.post("/api/intake/jobs", json={"preview_id": preview["preview_id"]}).json()
@@ -337,7 +337,7 @@ def test_aave_github_solidity_constants_preview_save_run_evidence(client: TestCl
     assert {candidate["suggested_role"] for candidate in candidates} == {"address_provider", "oracle"}
     assert {candidate["source_network"] for candidate in candidates} == {"Ethereum"}
     assert all(candidate["source_input_type"] == "github_solidity_address_book" for candidate in candidates)
-    assert all(candidate["evidence_type"] == "official_github_deployment" for candidate in candidates)
+    assert all(candidate["evidence_type"] == "github_deployment_source" for candidate in candidates)
     assert all(candidate["source_url"] == "https://raw.githubusercontent.com/aave-dao/aave-address-book/main/src/AaveV3Ethereum.sol" for candidate in candidates)
 
     job = client.post("/api/intake/jobs", json={"preview_id": preview["preview_id"]}).json()

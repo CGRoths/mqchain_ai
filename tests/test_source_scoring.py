@@ -20,8 +20,9 @@ def test_official_okx_source_scores_high_without_fake_url_matching() -> None:
     )
 
     assert score.source_score >= 80
-    assert score.source_trust in {"official_likely", "official_verified"}
-    assert score.confidence_cap >= 92
+    assert score.source_trust == "third_party_unverified"
+    assert score.confidence_cap == 55
+    assert "official_source_type_is_not_source_trust_without_verification" in score.warnings
 
 
 def test_random_okx_csv_has_identity_alignment_but_low_source_trust() -> None:
@@ -165,13 +166,45 @@ def test_conflict_penalty_blocks_discovery_even_for_official_source() -> None:
 def test_discovery_permission_tiers() -> None:
     scoring = SourceScoringService()
     official = scoring.score_source(SourceEvidenceBlock(source_url="https://www.okx.com/proof-of-reserves", source_type="official_site", entity_hint="OKX", manual_verification="official_checked"))
-    likely = scoring.score_source(SourceEvidenceBlock(source_url="https://www.okx.com/proof-of-reserves", source_type="official_site", entity_hint="OKX"))
-    audit = scoring.score_source(SourceEvidenceBlock(source_url="https://audits.example.com/okx.pdf", source_type="audit_report", entity_hint="OKX"))
+    unverified_official_url = scoring.score_source(SourceEvidenceBlock(source_url="https://www.okx.com/proof-of-reserves", source_type="official_site", entity_hint="OKX"))
+    verified_exchange = scoring.score_source(
+        SourceEvidenceBlock(
+            source_url="https://www.okx.com/proof-of-reserves",
+            source_type="official_site",
+            entity_hint="OKX",
+            extra_context={
+                "source_verification": {
+                    "verification_status": "verified",
+                    "source_trust": "third_party_exchange_reported",
+                    "verified_by": "pytest",
+                    "verified_at": "2026-06-26T00:00:00Z",
+                }
+            },
+        )
+    )
+    unverified_audit = scoring.score_source(SourceEvidenceBlock(source_url="https://audits.example.com/okx.pdf", source_type="audit_report", entity_hint="OKX"))
+    verified_audit = scoring.score_source(
+        SourceEvidenceBlock(
+            source_url="https://audits.example.com/okx.pdf",
+            source_type="audit_report",
+            entity_hint="OKX",
+            extra_context={
+                "source_verification": {
+                    "verification_status": "verified",
+                    "source_trust": "third_party_audit",
+                    "verified_by": "pytest",
+                    "verified_at": "2026-06-26T00:00:00Z",
+                }
+            },
+        )
+    )
     weak = scoring.score_source(SourceEvidenceBlock(source_url="https://random.example.com/okx.csv", source_type="csv_upload", entity_hint="OKX"))
 
     assert scoring.determine_discovery_permission(official, scoring.score_candidate(official, 95, 95, 100, 100)).discovery_depth == 3
-    assert scoring.determine_discovery_permission(likely, scoring.score_candidate(likely, 95, 95, 100, 100)).discovery_depth == 2
-    assert scoring.determine_discovery_permission(audit, scoring.score_candidate(audit, 65, 95, 100, 100)).discovery_depth in {1, 2}
+    assert scoring.determine_discovery_permission(unverified_official_url, scoring.score_candidate(unverified_official_url, 95, 95, 100, 100)).discovery_depth == 0
+    assert scoring.determine_discovery_permission(verified_exchange, scoring.score_candidate(verified_exchange, 95, 95, 100, 100)).discovery_depth == 2
+    assert scoring.determine_discovery_permission(unverified_audit, scoring.score_candidate(unverified_audit, 65, 95, 100, 100)).discovery_depth == 0
+    assert scoring.determine_discovery_permission(verified_audit, scoring.score_candidate(verified_audit, 65, 95, 100, 100)).discovery_depth in {1, 2}
     assert scoring.determine_discovery_permission(weak, scoring.score_candidate(weak, 65, 95, 100, 100)).discovery_depth <= 1
 
 

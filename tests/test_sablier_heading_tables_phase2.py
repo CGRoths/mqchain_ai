@@ -58,9 +58,10 @@ def test_sablier_lockup_heading_tables_normalize_networks_roles_and_provenance()
     assert {row.category for row in result.normalized_rows} == {"yield"}
     assert {row.sub_category for row in result.normalized_rows} == {"streaming_payments"}
     assert {row.role for row in result.normalized_rows} == {"protocol_contract", "nft_descriptor", "batch_contract"}
-    assert {row.evidence_type for row in result.normalized_rows} == {"official_docs_deployment"}
+    assert {row.evidence_type for row in result.normalized_rows} == {"docs_deployment_source"}
     assert {row.source_input_type for row in result.normalized_rows} == {"docs_html_deployment_table"}
-    assert all(row.confidence_initial >= 90 for row in result.normalized_rows)
+    assert all(row.source_trust_level == "third_party_unverified" for row in result.normalized_rows)
+    assert all(row.confidence_initial < 90 for row in result.normalized_rows)
     assert all(row.raw_reference["heading_path"][0] == "Deployment Addresses" for row in result.normalized_rows)
     assert all(row.raw_reference["table_name"].startswith("html_table_") for row in result.normalized_rows)
     assert all(row.raw_reference["row_number"] in {2, 3} for row in result.normalized_rows)
@@ -117,5 +118,5 @@ def test_web_docs_adapter_sablier_profile_uses_yield_category() -> None:
     assert len(parsed.candidates) == 2
     assert {candidate.source_network for candidate in parsed.candidates} == {"Sonic"}
     assert {candidate.suggested_role for candidate in parsed.candidates} == {"protocol_contract", "nft_descriptor"}
-    assert all(candidate.evidence_type == "official_docs_deployment" for candidate in parsed.candidates)
+    assert all(candidate.evidence_type == "docs_deployment_source" for candidate in parsed.candidates)
     assert all(candidate.source_input_type == "docs_html_deployment_table" for candidate in parsed.candidates)

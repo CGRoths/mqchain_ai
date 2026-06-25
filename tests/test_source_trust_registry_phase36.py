@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 from uuid import uuid4
 
 os.environ["MQCHAIN_AI_DATABASE_URL"] = "sqlite:///./data/test_mqchain_ai.db"
@@ -33,6 +34,10 @@ from app.review.candidate_audit import (
     classify_candidate_address_class,
     classify_source_trust_status,
 )
+from app.review.source_verification import record_source_verification
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -56,18 +61,21 @@ def test_source_trust_classification() -> None:
         okx = _candidate(db, job, evidence_type="Validator mapping from OKX ETH staking PoR CSV", suggested_role="staking_deposit_wallet")
         explorer = _candidate(db, job, evidence_type="TXT explorer link list", suggested_role="wallet_address_from_explorer_link")
 
-        assert classify_source_trust_status(hacken) == "official_audit_confirmed"
-        assert classify_source_trust_status(okx) == "official_staking_mapping"
-        assert classify_source_trust_status(explorer) == "weak_reference"
+        assert classify_source_trust_status(hacken) == "unknown"
+        assert classify_source_trust_status(okx) == "unknown"
+        assert classify_source_trust_status(explorer) == "unknown"
 
 
 def test_approval_readiness_classification() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        ready = _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
-        low = _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=70)
-        staking = _candidate(db, job, evidence_type="Validator mapping from OKX ETH staking PoR CSV", suggested_role="staking_deposit_wallet")
-        unknown = _candidate(db, job, evidence_type="Official CoinEx CET staking delegator list", suggested_role="unmapped_role")
+        verified_audit = _verification_payload("third_party_audit")
+        verified_exchange = _verification_payload("third_party_exchange_reported")
+        verified_official = _verification_payload("official_verified")
+        ready = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85, raw_reference=verified_audit)
+        low = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=70, raw_reference=verified_audit)
+        staking = _candidate(db, job, evidence_type="excel_wallet_list", suggested_role="staking_deposit_wallet", raw_reference=verified_exchange)
+        unknown = _candidate(db, job, evidence_type="manual_seed_context", suggested_role="unmapped_role", raw_reference=verified_official)
 
         assert _readiness(ready) == "ready_for_approval_cex_reserve"
         assert _readiness(low) == "needs_review_official_low_confidence"
@@ -78,14 +86,16 @@ def test_approval_readiness_classification() -> None:
 def test_audit_reports_source_trust_and_readiness_counts() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
-        _candidate(db, job, evidence_type="Validator mapping from OKX ETH staking PoR CSV", suggested_role="staking_deposit_wallet")
+        reserve = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85)
+        staking = _candidate(db, job, evidence_type="excel_wallet_list", suggested_role="staking_deposit_wallet")
+        _verify_candidate(db, reserve, source_trust="third_party_audit")
+        _verify_candidate(db, staking, source_trust="third_party_exchange_reported")
 
         report = audit_candidates(db, source_job_id=job.id)
 
-        assert report["count_by_source_trust_status"]["official_audit_confirmed"] == 1
+        assert report["count_by_source_trust_status"]["third_party_audit"] == 1
         assert report["count_by_approval_readiness"]["ready_for_approval_cex_reserve"] == 1
-        assert report["count_by_unique_source_trust_status"]["official_staking_mapping"] == 1
+        assert report["count_by_unique_source_trust_status"]["exchange_reported"] == 1
         assert report["count_by_unique_approval_readiness"]["needs_review_staking_mapping"] == 1
         assert report["count_by_review_bucket"]["ready_for_approval_cex_reserve"] == 1
 
@@ -93,8 +103,10 @@ def test_audit_reports_source_trust_and_readiness_counts() -> None:
 def test_unique_candidate_grouping_collapses_duplicates() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
+        first = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85)
+        second = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85)
+        _verify_candidate(db, first, source_trust="third_party_audit")
+        _verify_candidate(db, second, source_trust="third_party_audit")
 
         groups = get_unique_candidate_groups(db, source_job_id=job.id)
 
@@ -106,7 +118,8 @@ def test_unique_candidate_grouping_collapses_duplicates() -> None:
 def test_dry_run_approval_does_not_mutate_db() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
+        candidate = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85)
+        _verify_candidate(db, candidate, source_trust="third_party_audit")
 
         result = approve_candidate_groups(db, source_job_id=job.id, dry_run=True)
 
@@ -119,8 +132,10 @@ def test_dry_run_approval_does_not_mutate_db() -> None:
 def test_apply_approval_creates_registry_rows_and_is_idempotent() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
+        first_candidate = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85)
+        second_candidate = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85)
+        _verify_candidate(db, first_candidate, source_trust="third_party_audit")
+        _verify_candidate(db, second_candidate, source_trust="third_party_audit")
 
         first = approve_candidate_groups(db, source_job_id=job.id, dry_run=False, actor="test")
         second = approve_candidate_groups(db, source_job_id=job.id, dry_run=False, actor="test")
@@ -143,7 +158,8 @@ def test_apply_approval_creates_registry_rows_and_is_idempotent() -> None:
 def test_low_confidence_override_dry_run_does_not_mutate_db() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=70)
+        candidate = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=70)
+        _verify_candidate(db, candidate, source_trust="third_party_audit")
 
         result = approve_candidate_groups(
             db,
@@ -164,7 +180,8 @@ def test_low_confidence_override_dry_run_does_not_mutate_db() -> None:
 def test_low_confidence_override_apply_approves_official_reserve_and_is_idempotent() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=70)
+        candidate = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=70)
+        _verify_candidate(db, candidate, source_trust="third_party_audit")
 
         first = approve_candidate_groups(
             db,
@@ -196,14 +213,38 @@ def test_low_confidence_override_apply_approves_official_reserve_and_is_idempote
         assert db.scalar(select(func.count(ApprovedAddressEvidence.id))) == 1
 
 
+def test_hot_cold_override_apply_requires_verified_source() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        candidate = _candidate(db, job, evidence_type="excel_wallet_list", suggested_role="cex_hot_wallet", confidence_initial=90)
+        _verify_candidate(db, candidate, source_trust="official_verified")
+
+        result = approve_candidate_groups(
+            db,
+            source_job_id=job.id,
+            allow_review_readiness="needs_review_hot_cold_wallet",
+            dry_run=False,
+            actor="test",
+        )
+
+        approved = db.scalar(select(ApprovedAddress))
+        event = db.scalar(select(ApprovalEvent))
+
+        assert result["groups_approved"] == 1
+        assert result["override_groups_approved"] == 1
+        assert approved.address_class == "cex_hot_wallet"
+        assert event.reason == "manual_policy_override: official hot/cold wallet candidate"
+
+
 def test_low_confidence_override_does_not_approve_disallowed_classes() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", suggested_role="cex_hot_wallet", confidence_initial=70)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", suggested_role="cex_cold_wallet", confidence_initial=70, address="0x2222222222222222222222222222222222222222", normalized_address="0x2222222222222222222222222222222222222222")
-        _candidate(db, job, evidence_type="Validator mapping from OKX ETH staking PoR CSV", suggested_role="staking_deposit_wallet", confidence_initial=70, address="0x3333333333333333333333333333333333333333", normalized_address="0x3333333333333333333333333333333333333333")
-        _candidate(db, job, evidence_type="Official CoinEx CET staking delegator list", suggested_role="unmapped_role", confidence_initial=70, address="0x4444444444444444444444444444444444444444", normalized_address="0x4444444444444444444444444444444444444444")
+        _candidate(db, job, evidence_type="pdf_por_document", suggested_role="cex_hot_wallet", confidence_initial=70)
+        _candidate(db, job, evidence_type="pdf_por_document", suggested_role="cex_cold_wallet", confidence_initial=70, address="0x2222222222222222222222222222222222222222", normalized_address="0x2222222222222222222222222222222222222222")
+        _candidate(db, job, evidence_type="excel_wallet_list", suggested_role="staking_deposit_wallet", confidence_initial=70, address="0x3333333333333333333333333333333333333333", normalized_address="0x3333333333333333333333333333333333333333")
+        unknown = _candidate(db, job, evidence_type="manual_seed_context", suggested_role="unmapped_role", confidence_initial=70, address="0x4444444444444444444444444444444444444444", normalized_address="0x4444444444444444444444444444444444444444")
         _candidate(db, job, evidence_type="TXT explorer link list", suggested_role="wallet_address_from_explorer_link", confidence_initial=70, address="0x5555555555555555555555555555555555555555", normalized_address="0x5555555555555555555555555555555555555555")
+        _verify_candidate(db, unknown, source_trust="official_verified")
 
         result = approve_candidate_groups(
             db,
@@ -224,18 +265,23 @@ def test_low_confidence_override_does_not_approve_disallowed_classes() -> None:
 def test_export_returns_override_approved_rows(tmp_path) -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=70)
-        approve_candidate_groups(
+        candidate = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=70)
+        _verify_candidate(db, candidate, source_trust="third_party_audit")
+        result = approve_candidate_groups(
             db,
             source_job_id=job.id,
             allow_review_readiness="needs_review_official_low_confidence",
             dry_run=False,
         )
+        assert result["groups_approved"] == 1
+        assert db.scalar(select(func.count(ApprovedAddress.id))) == 1
 
     output = tmp_path / "approved_registry.csv"
+    database_url = f"sqlite:///{(REPO_ROOT / 'data' / 'test_mqchain_ai.db').as_posix()}"
     subprocess.run(
         [sys.executable, "scripts/export_approved_registry.py", "--output", str(output)],
-        cwd=".",
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "MQCHAIN_AI_DATABASE_URL": database_url},
         text=True,
         capture_output=True,
         check=True,
@@ -249,7 +295,8 @@ def test_export_returns_override_approved_rows(tmp_path) -> None:
 def test_non_approvable_readiness_is_skipped() -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Validator mapping from OKX ETH staking PoR CSV", suggested_role="staking_deposit_wallet")
+        candidate = _candidate(db, job, evidence_type="excel_wallet_list", suggested_role="staking_deposit_wallet")
+        _verify_candidate(db, candidate, source_trust="third_party_exchange_reported")
 
         result = approve_candidate_groups(db, source_job_id=job.id, approval_readiness="needs_review_staking_mapping", dry_run=False)
         repeated = approve_candidate_groups(db, source_job_id=job.id, approval_readiness="needs_review_staking_mapping", dry_run=False)
@@ -267,7 +314,8 @@ def test_non_approvable_readiness_is_skipped() -> None:
 def test_review_and_registry_api_endpoints(client: TestClient) -> None:
     with SessionLocal() as db:
         job = _source_job(db)
-        _candidate(db, job, evidence_type="Hacken Proof of Reserves audit PDF", confidence_initial=85)
+        candidate = _candidate(db, job, evidence_type="pdf_por_document", confidence_initial=85)
+        _verify_candidate(db, candidate, source_trust="third_party_audit")
         source_job_id = job.id
 
     response = client.post("/api/review/approve-candidate-groups", json={"source_job_id": source_job_id, "dry_run": False, "actor": "api-test"})
@@ -300,6 +348,36 @@ def _readiness(candidate: AddressCandidate) -> str:
     address_class = classify_candidate_address_class(candidate)
     trust = classify_source_trust_status(candidate)
     return classify_approval_readiness(candidate, trust, address_class, candidate.confidence_initial, len(candidate.evidence))
+
+
+def _verification_payload(source_trust: str) -> dict:
+    return {
+        "source_verification": {
+            "verification_status": "verified",
+            "source_trust": source_trust,
+            "verified_by": "pytest",
+            "verified_at": "2026-06-26T00:00:00Z",
+        }
+    }
+
+
+def _verify_candidate(db, candidate: AddressCandidate, *, source_trust: str) -> None:
+    record_source_verification(
+        db,
+        verification_scope="candidate",
+        verification_status="verified",
+        source_trust=source_trust,
+        verified_by="pytest",
+        source_job_id=candidate.source_job_id,
+        source_document_id=candidate.source_document_id,
+        candidate_id=candidate.id,
+        entity_name=candidate.entity_name,
+        source_url=candidate.source_url,
+        input_method=candidate.source_type,
+        evidence_shape=candidate.evidence_type,
+        verification_reason="test fixture",
+    )
+    db.commit()
 
 
 def _candidate(

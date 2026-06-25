@@ -8,18 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.intake import AddressCandidate, utcnow
+from app.review.source_verification import source_verification_payload, verification_gate_for_candidate
 
 
 APPROVABLE_STATUSES = {"needs_review"}
 APPROVED_STATUS = "approved"
-OFFICIAL_EVIDENCE_TYPES = {
-    "proof_of_reserves_audit",
-    "official_github_deployment",
-    "official_docs_deployment",
-    "official_github_address_book",
-    "official_github_address_constant",
-    "official_github_deployment_config",
-}
+# Kept for import compatibility; evidence type is no longer approval authority.
+OFFICIAL_EVIDENCE_TYPES: set[str] = set()
 BLOCKED_EVIDENCE_TYPES = {"official_github_relation"}
 BLOCKED_SOURCE_INPUT_TYPES = {"github_typescript_relation_map"}
 BLOCKED_ROLES = {"external_dependency", "unknown"}
@@ -49,7 +44,7 @@ def auto_approve_official_candidates(
     matched: list[AddressCandidate] = []
     skipped_reasons: Counter[str] = Counter()
     for candidate in candidates:
-        reason = _skip_reason(candidate)
+        reason = _skip_reason(db, candidate)
         if reason:
             skipped_reasons[reason] += 1
             continue
@@ -58,11 +53,13 @@ def auto_approve_official_candidates(
     if not dry_run:
         now = utcnow()
         for candidate in matched:
+            gate = verification_gate_for_candidate(db, candidate)
             candidate.status = APPROVED_STATUS
             candidate.approved_at = now
             candidate.approved_by = approved_by or "system"
-            candidate.approval_method = "official_source_auto_approval"
-            candidate.approval_notes = "Auto-approved high-confidence official-source candidate"
+            candidate.approval_method = "source_verification_auto_approval"
+            payload = source_verification_payload(gate.verification)
+            candidate.approval_notes = f"Auto-approved with source verification {payload.get('id') if payload else '(missing)'}"
         if matched:
             db.commit()
 
@@ -76,7 +73,7 @@ def auto_approve_official_candidates(
     }
 
 
-def _skip_reason(candidate: AddressCandidate) -> str | None:
+def _skip_reason(db: Session, candidate: AddressCandidate) -> str | None:
     if candidate.status not in APPROVABLE_STATUSES:
         return "status_not_needs_review"
     if not candidate.entity_name:
@@ -96,14 +93,15 @@ def _skip_reason(candidate: AddressCandidate) -> str | None:
         return scoring_reason
     if not candidate.evidence:
         return "missing_evidence"
-    if not _has_official_evidence(candidate):
-        return "non_official_evidence"
     if _is_storage_slot(candidate):
         return "storage_slot_like_address"
     if _has_blocked_metadata(candidate):
         return "blocked_source_metadata"
     if candidate.suggested_role == "token_contract" and _relations_only(candidate):
         return "relation_token_contract"
+    gate = verification_gate_for_candidate(db, candidate)
+    if not gate.allowed:
+        return gate.reason or "source_verification_not_allowed"
     return None
 
 
@@ -123,19 +121,6 @@ def _scoring_skip_reason(candidate: AddressCandidate) -> str | None:
     if source_trust in {"third_party_unverified", "manual_unverified", "unknown"}:
         return f"scoring_untrusted_source_{source_trust}"
     return None
-
-
-def _has_official_evidence(candidate: AddressCandidate) -> bool:
-    evidence_types = {candidate.evidence_type, *(evidence.evidence_type for evidence in candidate.evidence)}
-    if evidence_types & BLOCKED_EVIDENCE_TYPES:
-        return False
-    if evidence_types & OFFICIAL_EVIDENCE_TYPES:
-        return True
-    return (
-        candidate.source_type == "por_pdf"
-        and candidate.source_input_type == "pdf_audited_wallet_table"
-        and "audited_wallet" in evidence_types
-    )
 
 
 def _has_blocked_metadata(candidate: AddressCandidate) -> bool:

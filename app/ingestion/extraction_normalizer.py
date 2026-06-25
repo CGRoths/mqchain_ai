@@ -695,8 +695,8 @@ def _confidence_initial(
     source_trust_score: int | None,
 ) -> int:
     base = None
-    if structured_source and evidence_type in {"official_docs_deployment", "official_github_deployment", "source_extraction_context"}:
-        if evidence_type == "official_docs_deployment" and source_input_type in {"docs_html_deployment_table", "docs_markdown_deployment_table"}:
+    if structured_source and evidence_type in {"docs_deployment_source", "github_deployment_source", "source_extraction_context"}:
+        if evidence_type == "docs_deployment_source" and source_input_type in {"docs_html_deployment_table", "docs_markdown_deployment_table"}:
             if network_status == "recognized" and contract_name:
                 base = 95
             if network_status == "missing" and contract_name:
@@ -709,7 +709,7 @@ def _confidence_initial(
             base = 75
         if base is None and contract_name:
             base = 65
-    if base is None and evidence_type == "official_docs_deployment" and source_input_type == "docs_html_deployment_table":
+    if base is None and evidence_type == "docs_deployment_source" and source_input_type == "docs_html_deployment_table":
         if network and contract_name:
             base = 90
         elif contract_name:
