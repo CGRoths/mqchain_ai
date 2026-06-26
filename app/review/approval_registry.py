@@ -21,8 +21,11 @@ from app.models.intake import (
     ApprovalEvent,
     ApprovedAddress,
     ApprovedAddressEvidence,
+    ApprovedAddressObservation,
     ApprovedAddressRole,
     Entity,
+    SourceSnapshot,
+    utcnow,
 )
 
 
@@ -116,6 +119,8 @@ def approve_candidate_groups(
     allow_review_readiness: str | None = None,
     dry_run: bool = True,
     actor: str = "system",
+    source_snapshot_id: int | None = None,
+    new_only: bool = False,
 ) -> dict:
     groups = get_unique_candidate_groups(db, source_job_id=source_job_id, approval_readiness=approval_readiness)
     result = {
@@ -123,6 +128,8 @@ def approve_candidate_groups(
         "source_job_id": source_job_id,
         "approval_readiness": approval_readiness,
         "override_readiness_allowed": allow_review_readiness,
+        "source_snapshot_id": source_snapshot_id,
+        "new_only": new_only,
         "groups_scanned": len(groups),
         "groups_approved": 0,
         "groups_skipped": 0,
@@ -132,6 +139,7 @@ def approve_candidate_groups(
         "roles_created": 0,
         "evidence_linked": 0,
         "events_written": 0,
+        "observations_written": 0,
         "skipped_reasons": {},
     }
     skipped_reasons: Counter[str] = Counter()
@@ -157,6 +165,11 @@ def approve_candidate_groups(
                 result["events_written"] += 1
             continue
 
+        if new_only and _existing_approved_address_for_group(db, group) is not None:
+            result["groups_skipped"] += 1
+            skipped_reasons["already_approved_new_only"] += 1
+            continue
+
         if dry_run:
             result["groups_approved"] += 1
             if is_override:
@@ -167,14 +180,24 @@ def approve_candidate_groups(
         approved_address, address_created = _get_or_create_approved_address(db, entity, group)
         role, role_created = _get_or_create_role(db, approved_address, group)
         linked = _link_evidence(db, approved_address, group)
+        observations_written = _record_snapshot_observations(
+            db,
+            approved_address,
+            role,
+            group,
+            source_snapshot_id=source_snapshot_id,
+            address_created=address_created,
+            role_created=role_created,
+        )
 
         if address_created:
             result["addresses_created"] += 1
         if role_created:
             result["roles_created"] += 1
         result["evidence_linked"] += linked
+        result["observations_written"] += observations_written
 
-        if address_created or role_created or linked:
+        if address_created or role_created or linked or observations_written:
             result["groups_approved"] += 1
             if is_override:
                 result["override_groups_approved"] += 1
@@ -186,7 +209,14 @@ def approve_candidate_groups(
                 actor,
                 _override_reason(allow_review_readiness) if is_override else "approved_candidate_group",
                 dry_run,
-                {"entity_created": entity_created, "address_created": address_created, "role_created": role_created, "evidence_linked": linked},
+                {
+                    "entity_created": entity_created,
+                    "address_created": address_created,
+                    "role_created": role_created,
+                    "evidence_linked": linked,
+                    "observations_written": observations_written,
+                    "source_snapshot_id": source_snapshot_id,
+                },
             )
             result["events_written"] += 1
         else:
@@ -401,6 +431,9 @@ def _get_or_create_approved_address(db: Session, entity: Entity, group: Candidat
         approval_readiness_at_approval=group.approval_readiness,
         confidence_score=max(candidate.confidence_initial for candidate in group.candidates),
         status="approved",
+        first_seen_at=utcnow(),
+        last_seen_at=utcnow(),
+        lifecycle_status="active",
         metadata_json={
             "candidate_group_key": group.group_key,
             "candidate_count": len(group.candidates),
@@ -414,6 +447,20 @@ def _get_or_create_approved_address(db: Session, entity: Entity, group: Candidat
     db.add(approved)
     db.flush()
     return approved, True
+
+
+def _existing_approved_address_for_group(db: Session, group: CandidateGroup) -> ApprovedAddress | None:
+    if not group.entity_name or not group.chain_slug or not group.normalized_address:
+        return None
+    return db.scalar(
+        select(ApprovedAddress)
+        .join(Entity, Entity.id == ApprovedAddress.entity_id)
+        .where(
+            Entity.entity_name == group.entity_name,
+            ApprovedAddress.chain_slug == group.chain_slug,
+            ApprovedAddress.normalized_address == group.normalized_address,
+        )
+    )
 
 
 def _get_or_create_role(db: Session, approved_address: ApprovedAddress, group: CandidateGroup) -> tuple[ApprovedAddressRole, bool]:
@@ -470,6 +517,82 @@ def _link_evidence(db: Session, approved_address: ApprovedAddress, group: Candid
             linked += 1
     db.flush()
     return linked
+
+
+def _record_snapshot_observations(
+    db: Session,
+    approved_address: ApprovedAddress,
+    approved_role: ApprovedAddressRole,
+    group: CandidateGroup,
+    *,
+    source_snapshot_id: int | None,
+    address_created: bool,
+    role_created: bool,
+) -> int:
+    if source_snapshot_id is None:
+        return 0
+    snapshot = db.get(SourceSnapshot, source_snapshot_id)
+    if snapshot is None:
+        return 0
+    written = 0
+    now = utcnow()
+    for candidate in group.candidates:
+        existing = db.scalar(
+            select(ApprovedAddressObservation.id).where(
+                ApprovedAddressObservation.source_snapshot_id == snapshot.id,
+                ApprovedAddressObservation.candidate_id == candidate.id,
+                ApprovedAddressObservation.approved_address_id == approved_address.id,
+                ApprovedAddressObservation.role == (group.suggested_role or ""),
+            )
+        )
+        if existing:
+            continue
+        verification = find_source_verification_for_candidate(db, candidate)
+        source_evidence = candidate.raw_reference.get("source_evidence") if isinstance(candidate.raw_reference.get("source_evidence"), dict) else {}
+        observed_status = "new_candidate" if address_created else ("role_changed" if role_created else "unchanged_existing")
+        db.add(
+            ApprovedAddressObservation(
+                approved_address_id=approved_address.id,
+                approved_address_role_id=approved_role.id,
+                candidate_id=candidate.id,
+                source_snapshot_id=snapshot.id,
+                source_verification_id=verification.id if verification else None,
+                source_job_id=candidate.source_job_id,
+                source_document_id=candidate.source_document_id,
+                source_sheet=candidate.source_sheet,
+                entity_name=group.entity_name,
+                chain_slug=group.chain_slug,
+                normalized_address=group.normalized_address,
+                role=group.suggested_role,
+                address_class=group.address_class,
+                observed_status=observed_status,
+                observed_at=now,
+                snapshot_date=snapshot.snapshot_date or candidate.raw_reference.get("sheet_snapshot_date"),
+                snapshot_period=snapshot.snapshot_period,
+                evidence_type=candidate.evidence_type,
+                source_url=candidate.source_url,
+                source_origin=candidate.raw_reference.get("sheet_source_origin") or source_evidence.get("source_origin"),
+                payload_json={
+                    "candidate_group_key": group.group_key,
+                    "source_sheet": candidate.source_sheet,
+                    "source_evidence": source_evidence,
+                },
+            )
+        )
+        written += 1
+    if written:
+        approved_address.first_seen_at = approved_address.first_seen_at or now
+        approved_address.last_seen_at = now
+        approved_address.last_verified_at = (find_source_verification_for_candidate(db, group.candidates[0]).verified_at if find_source_verification_for_candidate(db, group.candidates[0]) else now)
+        approved_address.latest_snapshot_id = snapshot.id
+        approved_address.latest_snapshot_status = "observed"
+        approved_address.lifecycle_status = "active"
+        metadata = dict(approved_address.metadata_json or {})
+        metadata["latest_snapshot_status"] = "observed"
+        metadata["latest_snapshot_id"] = snapshot.id
+        approved_address.metadata_json = metadata
+    db.flush()
+    return written
 
 
 def _record_event(

@@ -189,6 +189,7 @@ class SourceVerification(TimestampMixin, Base):
     source_document_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_documents.id"), nullable=True, index=True)
     candidate_id: Mapped[int | None] = mapped_column(ForeignKey("mq_address_candidates.id"), nullable=True, index=True)
     candidate_group_key: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    source_sheet: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     entity_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     protocol_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -246,13 +247,19 @@ class ApprovedAddress(TimestampMixin, Base):
     confidence_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="approved", index=True)
     first_approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latest_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_snapshots.id"), nullable=True, index=True)
+    latest_snapshot_status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    lifecycle_status: Mapped[str] = mapped_column(String(64), nullable=False, default="active", index=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     entity = relationship("Entity", back_populates="approved_addresses")
     roles = relationship("ApprovedAddressRole", back_populates="approved_address")
     evidence = relationship("ApprovedAddressEvidence", back_populates="approved_address")
     events = relationship("ApprovalEvent", back_populates="approved_address")
+    observations = relationship("ApprovedAddressObservation", back_populates="approved_address", foreign_keys="ApprovedAddressObservation.approved_address_id")
 
 
 class ApprovedAddressRole(TimestampMixin, Base):
@@ -303,3 +310,65 @@ class ApprovalEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     approved_address = relationship("ApprovedAddress", back_populates="events")
+
+
+class SourceSnapshot(Base):
+    __tablename__ = "mq_source_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_job_id: Mapped[int] = mapped_column(ForeignKey("mq_source_jobs.id"), nullable=False, index=True)
+    source_document_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_documents.id"), nullable=True, index=True)
+    entity_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source_origin: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    official_referrer_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    snapshot_period: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    snapshot_date: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    file_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    previous_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_snapshots.id"), nullable=True, index=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    source_job = relationship("SourceJob")
+    source_document = relationship("SourceDocument")
+    previous_snapshot = relationship("SourceSnapshot", remote_side=[id])
+    observations = relationship("ApprovedAddressObservation", back_populates="source_snapshot")
+
+
+class ApprovedAddressObservation(Base):
+    __tablename__ = "mq_approved_address_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    approved_address_id: Mapped[int | None] = mapped_column(ForeignKey("mq_approved_addresses.id"), nullable=True, index=True)
+    approved_address_role_id: Mapped[int | None] = mapped_column(ForeignKey("mq_approved_address_roles.id"), nullable=True, index=True)
+    candidate_id: Mapped[int | None] = mapped_column(ForeignKey("mq_address_candidates.id"), nullable=True, index=True)
+    source_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_snapshots.id"), nullable=True, index=True)
+    source_verification_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_verifications.id"), nullable=True, index=True)
+    source_job_id: Mapped[int] = mapped_column(ForeignKey("mq_source_jobs.id"), nullable=False, index=True)
+    source_document_id: Mapped[int | None] = mapped_column(ForeignKey("mq_source_documents.id"), nullable=True, index=True)
+    source_sheet: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    entity_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    chain_slug: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    normalized_address: Mapped[str | None] = mapped_column(String(512), nullable=True, index=True)
+    role: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    address_class: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    observed_status: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    snapshot_date: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    snapshot_period: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    evidence_type: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_origin: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    approved_address = relationship("ApprovedAddress", back_populates="observations", foreign_keys=[approved_address_id])
+    approved_address_role = relationship("ApprovedAddressRole")
+    candidate = relationship("AddressCandidate")
+    source_snapshot = relationship("SourceSnapshot", back_populates="observations")
+    source_verification = relationship("SourceVerification")
+    source_job = relationship("SourceJob")
+    source_document = relationship("SourceDocument")

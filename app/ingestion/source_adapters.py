@@ -286,6 +286,8 @@ CONTROL_SHEET_NAMES = {
     "read me",
     "notes",
     "metadata",
+    "source manifest",
+    "mqchain source manifest",
     "instructions",
     "config",
     "settings",
@@ -564,12 +566,13 @@ class ExcelCsvAdapter(SourceAdapter):
                 "skipped_sheet_names": [],
             }
         else:
-            tables, parsed_sheets, skipped_sheets, warnings = _xlsx_tables(raw_content)
+            tables, parsed_sheets, skipped_sheets, warnings, sheet_profiles = _xlsx_tables(raw_content, artifact.source_evidence)
             metadata = {
                 "source_input_type": "xlsx_multi_sheet_registry" if len(parsed_sheets) > 1 else "xlsx_registry",
                 "sheet_count": len(parsed_sheets) + len(skipped_sheets),
                 "parsed_sheet_names": parsed_sheets,
                 "skipped_sheet_names": skipped_sheets,
+                "sheet_profiles": sheet_profiles,
                 "warnings": warnings,
             }
         candidates = _extract_table_candidates(artifact, fingerprint, tables, default_source_input_type=metadata["source_input_type"])
@@ -774,19 +777,22 @@ def _csv_tables(raw_content: bytes) -> list[dict]:
     return [{"name": "csv_registry", "headers": headers, "rows": rows, "start_line": 2}]
 
 
-def _xlsx_tables(raw_content: bytes) -> tuple[list[dict], list[str], list[str], list[str]]:
+def _xlsx_tables(raw_content: bytes, source_evidence: dict | None = None) -> tuple[list[dict], list[str], list[str], list[str], dict[str, dict]]:
     try:
         from openpyxl import load_workbook
     except Exception:
-        return [], [], [], ["openpyxl_unavailable"]
+        return [], [], [], ["openpyxl_unavailable"], {}
     try:
         workbook = load_workbook(BytesIO(raw_content), read_only=True, data_only=True)
     except Exception:
-        return [], [], [], ["xlsx_read_failed"]
+        return [], [], [], ["xlsx_read_failed"], {}
 
     tables: list[dict] = []
     parsed_sheets: list[str] = []
     skipped_sheets: list[str] = []
+    manifest_profiles = _xlsx_manifest_profiles(workbook)
+    provided_profiles = (source_evidence or {}).get("sheet_profiles") if isinstance((source_evidence or {}).get("sheet_profiles"), dict) else {}
+    sheet_profiles = _merge_sheet_profiles(manifest_profiles, provided_profiles)
     for sheet in workbook.worksheets:
         if _skip_xlsx_sheet(sheet.title):
             skipped_sheets.append(sheet.title)
@@ -801,9 +807,94 @@ def _xlsx_tables(raw_content: bytes) -> tuple[list[dict], list[str], list[str], 
             continue
         table = _table_from_rows(sheet.title, rows)
         table["sheet_name"] = sheet.title
+        profile = _sheet_profile_for(sheet.title, sheet_profiles)
+        if profile:
+            table["sheet_profile"] = profile
         parsed_sheets.append(sheet.title)
         tables.append(table)
-    return tables, parsed_sheets, skipped_sheets, []
+    return tables, parsed_sheets, skipped_sheets, [], sheet_profiles
+
+
+SHEET_PROFILE_FIELDS = {
+    "entity_hint",
+    "source_url",
+    "source_origin",
+    "official_referrer_url",
+    "provenance_type",
+    "evidence_shape",
+    "snapshot_date",
+    "operator_note",
+    "source_trust",
+    "verification_status",
+    "verified_by",
+}
+SHEET_REFERENCE_FIELD_MAP = {
+    "entity_hint": "sheet_entity_hint",
+    "source_url": "sheet_source_url",
+    "source_origin": "sheet_source_origin",
+    "official_referrer_url": "sheet_official_referrer_url",
+    "provenance_type": "sheet_provenance_type",
+    "evidence_shape": "sheet_evidence_shape",
+    "snapshot_date": "sheet_snapshot_date",
+    "operator_note": "sheet_operator_note",
+}
+
+
+def _xlsx_manifest_profiles(workbook) -> dict[str, dict]:
+    profiles: dict[str, dict] = {}
+    for sheet in workbook.worksheets:
+        if _normalize_sheet_name(sheet.title) not in {"source manifest", "mqchain source manifest"}:
+            continue
+        rows: list[tuple[int, list[str]]] = []
+        for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            values = ["" if value is None else str(value).strip() for value in row]
+            if any(values):
+                rows.append((row_number, values))
+        if not rows:
+            continue
+        table = _table_from_rows(sheet.title, rows)
+        for row in table.get("rows", []):
+            normalized = {_manifest_key(key): value for key, value in row.items() if not str(key).startswith("_")}
+            sheet_name = str(normalized.get("sheet_name") or "").strip()
+            if not sheet_name:
+                continue
+            profile = {
+                key: str(normalized[key]).strip()
+                for key in SHEET_PROFILE_FIELDS
+                if normalized.get(key) not in {None, ""}
+            }
+            if profile:
+                profiles[sheet_name] = profile
+    return profiles
+
+
+def _merge_sheet_profiles(manifest_profiles: dict[str, dict], provided_profiles: dict) -> dict[str, dict]:
+    merged: dict[str, dict] = {str(sheet): dict(profile) for sheet, profile in manifest_profiles.items() if isinstance(profile, dict)}
+    for sheet, profile in provided_profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        sheet_name = str(sheet)
+        merged[sheet_name] = {
+            **merged.get(sheet_name, {}),
+            **{str(key): value for key, value in profile.items() if key in SHEET_PROFILE_FIELDS and value not in {None, ""}},
+        }
+    return merged
+
+
+def _sheet_profile_for(sheet_name: str | None, profiles: dict[str, dict]) -> dict:
+    if not sheet_name:
+        return {}
+    if sheet_name in profiles:
+        return dict(profiles[sheet_name])
+    normalized = _normalize_sheet_name(sheet_name)
+    for key, profile in profiles.items():
+        if _normalize_sheet_name(str(key)) == normalized:
+            return dict(profile)
+    return {}
+
+
+def _manifest_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
 
 
 def _table_from_rows(name: str, rows: list[tuple[int, list[str]]]) -> dict:
@@ -1600,6 +1691,7 @@ def _extract_table_candidates(
     candidates: list[CandidatePreview] = []
     for table in tables:
         table_meta = table.get("metadata") or {}
+        sheet_profile = table.get("sheet_profile") if isinstance(table.get("sheet_profile"), dict) else {}
         table_source_input_type = table_meta.get("source_input_type") or default_source_input_type
         table_evidence_type = table_meta.get("evidence_type")
         mapping = ColumnMappingService.map_headers([str(header) for header in table.get("headers", [])])
@@ -1608,7 +1700,8 @@ def _extract_table_candidates(
                 continue
             raw_network = mapping.get(row, "chain")
             role_hint = mapping.get(row, "role")
-            source_url, source_file_name = _source_reference_from_row(mapping.get(row, "source_url"), artifact.source_url)
+            sheet_source_url = sheet_profile.get("source_url") or artifact.source_url
+            source_url, source_file_name = _source_reference_from_row(mapping.get(row, "source_url"), sheet_source_url)
             row_number = _int_or_none(mapping.get(row, "source_row")) or _int_or_none(str(row.get("_row_number")))
             base_reference = _row_reference(
                 row=row,
@@ -1617,6 +1710,7 @@ def _extract_table_candidates(
                 source_file_name=source_file_name,
                 default_source_input_type=table_source_input_type,
             )
+            base_reference.update(_sheet_reference_fields(table.get("sheet_name"), sheet_profile, artifact.source_evidence))
             for address_kind, address, role in _structured_address_fields(mapping, row, role_hint, table):
                 candidate = _candidate_from_address(
                     artifact,
@@ -1630,7 +1724,7 @@ def _extract_table_candidates(
                     source_row=row_number,
                     source_page=_int_or_none(mapping.get(row, "source_row")) if "page" in (mapping.columns.get("source_row") or "").lower() else None,
                     table_name=table.get("name"),
-                    evidence_type=mapping.get(row, "evidence_type") or table_evidence_type or "source_extraction_context",
+                    evidence_type=mapping.get(row, "evidence_type") or sheet_profile.get("evidence_shape") or table_evidence_type or "source_extraction_context",
                     source_input_type=table_source_input_type,
                     raw_reference={**base_reference, "address_column_kind": address_kind},
                 )
@@ -1651,7 +1745,7 @@ def _extract_table_candidates(
                     source_row=row_number,
                     source_page=None,
                     table_name=table.get("name"),
-                    evidence_type=mapping.get(row, "evidence_type") or table_evidence_type or "source_extraction_context",
+                    evidence_type=mapping.get(row, "evidence_type") or sheet_profile.get("evidence_shape") or table_evidence_type or "source_extraction_context",
                     source_input_type=table_source_input_type,
                     raw_reference={**base_reference, "address_column_kind": "row_regex"},
                 )
@@ -1769,7 +1863,7 @@ def _candidate_from_address(
         content_type=artifact.content_type,
         source_trust=source_trust,
     )
-    entity = raw_reference.get("row_entity") or _entity_from_sheet_name(source_sheet) or source_identity.entity_name
+    entity = raw_reference.get("row_entity") or raw_reference.get("sheet_entity_hint") or _entity_from_sheet_name(source_sheet) or source_identity.entity_name
     if not raw_network and source_input_type in {
         "docs_html_deployment_table",
         "docs_markdown_deployment_table",
@@ -1879,6 +1973,22 @@ def _row_reference(*, row: dict, table: dict, mapping: ColumnMapping, source_fil
         "validator_public_key": validator_public_key,
         "warnings": ["validator_public_key_metadata_only"] if validator_public_key else [],
     }
+
+
+def _sheet_reference_fields(source_sheet: str | None, sheet_profile: dict, global_source_evidence: dict | None) -> dict:
+    if not sheet_profile:
+        return {}
+    effective_source_evidence = dict(global_source_evidence or {})
+    effective_source_evidence.update({key: value for key, value in sheet_profile.items() if key in SHEET_PROFILE_FIELDS})
+    if source_sheet:
+        effective_source_evidence["source_sheet"] = source_sheet
+    reference = {
+        target: sheet_profile.get(source)
+        for source, target in SHEET_REFERENCE_FIELD_MAP.items()
+        if sheet_profile.get(source) not in {None, ""}
+    }
+    reference["source_evidence"] = effective_source_evidence
+    return reference
 
 
 def _deployment_raw_details(row: dict) -> dict:

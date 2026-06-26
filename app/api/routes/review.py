@@ -15,12 +15,14 @@ from app.models.intake import (
     ApprovedAddressEvidence,
     ApprovedAddressRole,
     Entity,
+    SourceSnapshot,
     SourceVerification,
 )
 from app.review.approval_registry import approve_candidate_groups, get_unique_candidate_groups
 from app.review.candidate_audit import audit_candidates
 from app.review.official_auto_approval import auto_approve_official_candidates
 from app.review.source_verification import record_source_verification, source_verification_payload
+from app.review.snapshot_diff import create_source_snapshot, diff_source_snapshot, mark_missing_in_latest
 
 
 api_router = APIRouter(prefix="/review", tags=["review"])
@@ -51,6 +53,8 @@ class ApproveCandidateGroupsRequest(BaseModel):
     allow_review_readiness: str | None = None
     dry_run: bool = True
     actor: str = "system"
+    source_snapshot_id: int | None = None
+    new_only: bool = False
 
 
 class CandidateGroupsRequest(BaseModel):
@@ -63,6 +67,7 @@ class SourceVerificationRequest(BaseModel):
     source_document_id: int | None = None
     candidate_id: int | None = None
     candidate_group_key: str | None = None
+    source_sheet: str | None = None
     entity_name: str | None = None
     entity_id: int | None = None
     protocol_name: str | None = None
@@ -78,6 +83,27 @@ class SourceVerificationRequest(BaseModel):
     verified_by: str | None = None
     verification_reason: str | None = None
     verification_evidence_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceSnapshotRequest(BaseModel):
+    source_job_id: int
+    snapshot_type: str = "reserve_snapshot"
+    snapshot_period: str | None = None
+    snapshot_date: str | None = None
+    previous_snapshot_id: int | None = None
+    created_by: str | None = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class SnapshotDiffRequest(BaseModel):
+    source_job_id: int
+    source_snapshot_id: int | None = None
+
+
+class MarkMissingRequest(BaseModel):
+    source_job_id: int
+    source_snapshot_id: int
+    dry_run: bool = True
 
 
 @api_router.post("/auto-approve-official", response_model=AutoApproveOfficialResponse)
@@ -131,6 +157,8 @@ def approve_groups(payload: ApproveCandidateGroupsRequest, db: DBSession) -> dic
         allow_review_readiness=payload.allow_review_readiness,
         dry_run=payload.dry_run,
         actor=payload.actor,
+        source_snapshot_id=payload.source_snapshot_id,
+        new_only=payload.new_only,
     )
 
 
@@ -147,6 +175,7 @@ def create_source_verification(payload: SourceVerificationRequest, db: DBSession
             source_document_id=payload.source_document_id,
             candidate_id=payload.candidate_id,
             candidate_group_key=payload.candidate_group_key,
+            source_sheet=payload.source_sheet,
             entity_name=payload.entity_name,
             entity_id=payload.entity_id,
             protocol_name=payload.protocol_name,
@@ -177,10 +206,49 @@ def create_source_verification(payload: SourceVerificationRequest, db: DBSession
     }
 
 
+@api_router.post("/source-snapshots")
+def create_snapshot(payload: SourceSnapshotRequest, db: DBSession) -> dict[str, Any]:
+    try:
+        snapshot = create_source_snapshot(
+            db,
+            source_job_id=payload.source_job_id,
+            snapshot_type=payload.snapshot_type,
+            snapshot_period=payload.snapshot_period,
+            snapshot_date=payload.snapshot_date,
+            previous_snapshot_id=payload.previous_snapshot_id,
+            created_by=payload.created_by,
+            metadata_json=payload.metadata_json,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"fatal_errors": [str(exc)]}) from exc
+    db.commit()
+    db.refresh(snapshot)
+    return _source_snapshot_row(snapshot)
+
+
+@api_router.post("/source-snapshots/diff")
+def snapshot_diff(payload: SnapshotDiffRequest, db: DBSession) -> dict[str, Any]:
+    return diff_source_snapshot(db, payload.source_job_id, payload.source_snapshot_id)
+
+
+@api_router.post("/source-snapshots/mark-missing")
+def mark_missing(payload: MarkMissingRequest, db: DBSession) -> dict[str, Any]:
+    try:
+        return mark_missing_in_latest(
+            db,
+            source_job_id=payload.source_job_id,
+            source_snapshot_id=payload.source_snapshot_id,
+            dry_run=payload.dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"fatal_errors": [str(exc)]}) from exc
+
+
 @api_router.get("/source-verifications")
 def source_verifications(
     db: DBSession,
     source_job_id: int | None = None,
+    source_sheet: str | None = None,
     entity_name: str | None = None,
     source_trust: str | None = None,
     verification_status: str | None = None,
@@ -190,6 +258,8 @@ def source_verifications(
     stmt = select(SourceVerification).order_by(SourceVerification.created_at.desc(), SourceVerification.id.desc())
     if source_job_id is not None:
         stmt = stmt.where(SourceVerification.source_job_id == source_job_id)
+    if source_sheet:
+        stmt = stmt.where(SourceVerification.source_sheet == source_sheet)
     if entity_name:
         stmt = stmt.where(SourceVerification.entity_name.ilike(f"%{entity_name}%"))
     if source_trust:
@@ -277,12 +347,34 @@ def _source_verification_row(verification: SourceVerification) -> dict[str, Any]
     return {
         **(source_verification_payload(verification) or {}),
         "entity_name": verification.entity_name,
+        "source_sheet": verification.source_sheet,
         "source_origin": verification.source_origin,
         "source_url": verification.source_url,
         "evidence_shape": verification.evidence_shape,
         "verification_reason": verification.verification_reason,
         "created_at": verification.created_at.isoformat() if verification.created_at else None,
         "updated_at": verification.updated_at.isoformat() if verification.updated_at else None,
+    }
+
+
+def _source_snapshot_row(snapshot: SourceSnapshot) -> dict[str, Any]:
+    return {
+        "id": snapshot.id,
+        "source_job_id": snapshot.source_job_id,
+        "source_document_id": snapshot.source_document_id,
+        "entity_name": snapshot.entity_name,
+        "source_origin": snapshot.source_origin,
+        "source_url": snapshot.source_url,
+        "official_referrer_url": snapshot.official_referrer_url,
+        "snapshot_type": snapshot.snapshot_type,
+        "snapshot_period": snapshot.snapshot_period,
+        "snapshot_date": snapshot.snapshot_date,
+        "file_hash": snapshot.file_hash,
+        "content_hash": snapshot.content_hash,
+        "previous_snapshot_id": snapshot.previous_snapshot_id,
+        "created_by": snapshot.created_by,
+        "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+        "metadata_json": snapshot.metadata_json or {},
     }
 
 

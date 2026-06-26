@@ -1,6 +1,7 @@
 from app.models.intake import (
     AddressCandidate,
     AddressEvidence,
+    ApprovedAddressObservation,
     ApprovalEvent,
     ApprovedAddress,
     ApprovedAddressEvidence,
@@ -10,6 +11,7 @@ from app.models.intake import (
     IntakePreview,
     RegistryAddress,
     SourceDocument,
+    SourceSnapshot,
     SourceVerification,
     SourceJob,
     StagedArtifact,
@@ -18,6 +20,7 @@ from app.models.intake import (
 __all__ = [
     "AddressCandidate",
     "AddressEvidence",
+    "ApprovedAddressObservation",
     "ApprovalEvent",
     "ApprovedAddress",
     "ApprovedAddressEvidence",
@@ -27,6 +30,7 @@ __all__ = [
     "IntakePreview",
     "RegistryAddress",
     "SourceDocument",
+    "SourceSnapshot",
     "SourceVerification",
     "SourceJob",
     "StagedArtifact",

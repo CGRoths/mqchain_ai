@@ -515,6 +515,11 @@ class IntakeOrchestrator:
         item: CandidatePreview,
         job: SourceJob,
     ) -> None:
+        source_evidence = (
+            item.raw_reference.get("source_evidence")
+            if isinstance(item.raw_reference.get("source_evidence"), dict)
+            else dict((job.source_artifact_json or {}).get("source_evidence") or {})
+        )
         evidence = AddressEvidence(
             candidate_id=candidate.id,
             source_document_id=source_document.id,
@@ -534,7 +539,16 @@ class IntakeOrchestrator:
                 "row_number": item.source_row,
                 "page_number": item.source_page,
                 "raw_reference": item.raw_reference,
-                "source_evidence": dict((job.source_artifact_json or {}).get("source_evidence") or {}),
+                "source_evidence": source_evidence,
+                "source_sheet": item.source_sheet,
+                "sheet_entity_hint": item.raw_reference.get("sheet_entity_hint"),
+                "sheet_source_url": item.raw_reference.get("sheet_source_url"),
+                "sheet_source_origin": item.raw_reference.get("sheet_source_origin"),
+                "sheet_official_referrer_url": item.raw_reference.get("sheet_official_referrer_url"),
+                "sheet_provenance_type": item.raw_reference.get("sheet_provenance_type"),
+                "sheet_evidence_shape": item.raw_reference.get("sheet_evidence_shape"),
+                "sheet_snapshot_date": item.raw_reference.get("sheet_snapshot_date"),
+                "sheet_operator_note": item.raw_reference.get("sheet_operator_note"),
                 "parser_warnings": item.warnings,
             },
             confidence_reason="structured_network_column" if item.source_network else "address_pattern_fallback",

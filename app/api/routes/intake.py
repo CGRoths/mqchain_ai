@@ -250,6 +250,21 @@ INTAKE_CONSOLE_HTML = """
         <pre id="sourceEvidencePreview" class="json-preview">{}</pre>
       </details>
 
+      <details id="sheetMappingPanel">
+        <summary>Sheet Mapping</summary>
+        <div class="actions">
+          <button type="button" class="small" id="autoFillSheets">Auto Fill From Sheet Names</button>
+          <button type="button" class="small" id="applyGlobalSheets">Apply Global Metadata To All Sheets</button>
+          <button type="button" class="small" id="importManifestSheets">Import Manifest From Workbook</button>
+          <button type="button" class="small" id="saveSheetMapping">Save Sheet Mapping</button>
+          <button type="button" class="small primary" id="previewWithSheetMapping">Preview With Sheet Mapping</button>
+        </div>
+        <div class="table-scroll"><table class="candidate-table" aria-label="Sheet mapping table">
+          <thead><tr><th>Sheet Name</th><th>Entity Hint</th><th>Source URL</th><th>Source Origin</th><th>Official Referrer URL</th><th>Provenance Type</th><th>Evidence Shape</th><th>Snapshot Date</th><th>Operator Note</th><th>Use Sheet?</th><th>Verification Status</th><th>Source Trust</th></tr></thead>
+          <tbody id="sheetMappingRows"></tbody>
+        </table></div>
+      </details>
+
       <div class="actions">
         <button type="button" class="primary" id="preview">Analyze / Preview</button>
         <button type="button" id="save">Save Source Job</button>
@@ -307,7 +322,7 @@ INTAKE_CONSOLE_HTML = """
       <div class="two">
         <label>Verified By<input id="verified_by" placeholder="CRAY"></label>
         <label>Verification Scope<select id="verification_scope">
-          <option>source_job</option><option>source_document</option><option>candidate_group</option><option>candidate</option><option>domain</option><option>github_repo</option><option>manual_upload</option>
+          <option>source_job</option><option>source_sheet</option><option>source_document</option><option>candidate_group</option><option>candidate</option><option>domain</option><option>github_repo</option><option>manual_upload</option>
         </select></label>
       </div>
       <label>Verification Reason<textarea id="verification_reason"></textarea></label>
@@ -319,6 +334,17 @@ INTAKE_CONSOLE_HTML = """
         <button type="button" data-trust="third_party_audit">Mark Third-Party Audit</button>
         <button type="button" data-trust="official_verified">Mark Official Verified</button>
       </div>
+
+      <details id="verifySheetsPanel">
+        <summary>Verify Sheets</summary>
+        <div class="actions">
+          <button type="button" id="verifyAllSheets" class="primary">Verify All Sheets With Current Mapping</button>
+        </div>
+        <div class="table-scroll"><table class="candidate-table" aria-label="Verify sheets table">
+          <thead><tr><th>Sheet</th><th>Candidates</th><th>Entity Hint</th><th>Source URL</th><th>Source Origin</th><th>Source Trust</th><th>Verified By</th><th>Actions</th></tr></thead>
+          <tbody id="verifySheetRows"></tbody>
+        </table></div>
+      </details>
 
       <h2>Review / Approval</h2>
       <div class="actions">
@@ -369,6 +395,30 @@ INTAKE_CONSOLE_HTML = """
         </div>
         <div class="actions"><button type="button" id="viewApprovalEvents">View Approval Events</button></div>
       </details>
+      <details>
+        <summary>Snapshot / Monthly Update</summary>
+        <div class="control-filters">
+          <label>Snapshot Type<input id="snapshot_type" value="reserve_snapshot"></label>
+          <label>Snapshot Period<input id="snapshot_period" placeholder="2026-04"></label>
+          <label>Snapshot Date<input id="snapshot_date" placeholder="2026-04-22"></label>
+          <label>Previous Snapshot<input id="previous_snapshot_id" type="number"></label>
+          <label>Snapshot ID<input id="source_snapshot_id" type="number"></label>
+          <label>Created By<input id="snapshot_created_by" placeholder="CRAY"></label>
+        </div>
+        <div class="actions">
+          <button type="button" id="createSnapshot">Create Snapshot</button>
+          <button type="button" id="diffRegistry">Diff Against Approved Registry</button>
+          <button type="button" id="diffPrevious">Diff Against Previous Snapshot</button>
+          <button type="button" id="viewNewAddresses">View New Addresses</button>
+          <button type="button" id="viewUnchangedAddresses">View Unchanged Addresses</button>
+          <button type="button" id="viewMissingLatest">View Missing In Latest</button>
+          <button type="button" id="approveNewDry">Approve New Only Dry Run</button>
+          <button type="button" id="approveNewApply" class="danger-apply">Approve New Only Apply</button>
+          <button type="button" id="markMissingDry">Mark Missing As Stale Dry Run</button>
+          <button type="button" id="markMissingApply" class="danger-apply">Mark Missing As Stale Apply</button>
+        </div>
+        <div id="snapshotSummary" class="summary-cards" hidden></div>
+      </details>
       <div id="controlResults"></div>
 
       <h2>Raw JSON Output</h2>
@@ -389,6 +439,9 @@ INTAKE_CONSOLE_HTML = """
   </div>
   <script>
     let mode = "upload";
+    let lastPreview = null;
+    let sheetProfiles = {};
+    let lastSnapshotDiff = null;
     const workflow = {
       preview: "pending",
       job: "pending",
@@ -547,6 +600,7 @@ INTAKE_CONSOLE_HTML = """
     const verificationColumns = [
       { key: "id", label: "ID" },
       { key: "source_job_id", label: "Source Job" },
+      { key: "source_sheet", label: "Sheet" },
       { key: "entity_name", label: "Entity" },
       { key: "source_origin", label: "Origin" },
       { key: "source_url", label: "Source URL" },
@@ -601,6 +655,80 @@ INTAKE_CONSOLE_HTML = """
         <div class="summary-card"><span>${cell(key)}</span><strong>${cell(key === "skipped_reasons" ? compactJson(data[key] || {}) : data[key])}</strong></div>
       `).join("");
     };
+    const renderSnapshotSummary = data => {
+      const keys = ["total_candidates", "existing_approved", "new_addresses", "unchanged_existing", "new_roles", "missing_in_latest", "conflicts", "rejected", "ready_for_approval"];
+      const summary = document.getElementById("snapshotSummary");
+      summary.hidden = false;
+      summary.innerHTML = keys.map(key => `
+        <div class="summary-card"><span>${cell(key)}</span><strong>${cell(data[key] ?? 0)}</strong></div>
+      `).join("");
+    };
+    const sheetNamesFromPreview = data => ((data?.profile?.parsed_sheet_names || []).filter(Boolean));
+    const readSheetMapping = () => {
+      const next = {};
+      document.querySelectorAll("[data-sheet-row]").forEach(row => {
+        const sheet = row.dataset.sheetRow;
+        if (!row.querySelector("[data-field='use_sheet']").checked) return;
+        const profile = {};
+        row.querySelectorAll("[data-field]").forEach(input => {
+          const field = input.dataset.field;
+          if (field === "use_sheet") return;
+          const value = input.value.trim();
+          if (value) profile[field] = value;
+        });
+        next[sheet] = profile;
+      });
+      sheetProfiles = next;
+      return next;
+    };
+    const renderSheetMapping = data => {
+      const sheets = sheetNamesFromPreview(data);
+      const manifestProfiles = data?.profile?.metadata?.sheet_profiles || {};
+      if (!Object.keys(sheetProfiles).length) sheetProfiles = manifestProfiles || {};
+      const body = document.getElementById("sheetMappingRows");
+      body.innerHTML = sheets.map(sheet => {
+        const profile = sheetProfiles[sheet] || manifestProfiles[sheet] || {};
+        const input = (field, value = "") => `<input data-field="${field}" value="${cell(value)}">`;
+        return `
+          <tr data-sheet-row="${cell(sheet)}">
+            <td>${cell(sheet)}</td>
+            <td>${input("entity_hint", profile.entity_hint || "")}</td>
+            <td>${input("source_url", profile.source_url || "")}</td>
+            <td>${input("source_origin", profile.source_origin || "")}</td>
+            <td>${input("official_referrer_url", profile.official_referrer_url || "")}</td>
+            <td>${input("provenance_type", profile.provenance_type || "")}</td>
+            <td>${input("evidence_shape", profile.evidence_shape || "")}</td>
+            <td>${input("snapshot_date", profile.snapshot_date || "")}</td>
+            <td>${input("operator_note", profile.operator_note || "")}</td>
+            <td><input data-field="use_sheet" type="checkbox" ${profile.use_sheet === false ? "" : "checked"}></td>
+            <td>${input("verification_status", profile.verification_status || "verified")}</td>
+            <td>${input("source_trust", profile.source_trust || "third_party_unverified")}</td>
+          </tr>
+        `;
+      }).join("");
+      renderVerifySheets(data);
+    };
+    const renderVerifySheets = data => {
+      const rows = candidatesFrom(data || lastPreview);
+      const counts = rows.reduce((acc, item) => {
+        const sheet = item.source_sheet || item.raw_reference?.source_sheet;
+        if (sheet) acc[sheet] = (acc[sheet] || 0) + 1;
+        return acc;
+      }, {});
+      const profiles = Object.keys(sheetProfiles).length ? sheetProfiles : (data?.profile?.metadata?.sheet_profiles || {});
+      document.getElementById("verifySheetRows").innerHTML = Object.entries(profiles).map(([sheet, profile]) => `
+        <tr data-verify-sheet="${cell(sheet)}">
+          <td>${cell(sheet)}</td>
+          <td>${cell(counts[sheet] || 0)}</td>
+          <td>${cell(profile.entity_hint)}</td>
+          <td>${cell(profile.source_url)}</td>
+          <td>${cell(profile.source_origin)}</td>
+          <td><select data-field="source_trust"><option>${cell(profile.source_trust || "third_party_unverified")}</option><option>official_verified</option><option>third_party_exchange_reported</option><option>third_party_audit</option><option>manual_verified</option><option>rejected</option></select></td>
+          <td><input data-field="verified_by" value="${cell(profile.verified_by || val("verified_by") || "")}"></td>
+          <td><button type="button" class="small" data-verify-sheet-button="${cell(sheet)}">Verify Sheet</button> <button type="button" class="small" data-reject-sheet-button="${cell(sheet)}">Reject Sheet</button> <button type="button" class="small" data-review-sheet-button="${cell(sheet)}">Mark Sheet Needs Review</button></td>
+        </tr>
+      `).join("");
+    };
     const show = (data, view = "candidates") => {
       if (view === "none") hideTables();
       else if (view === "evidence") renderEvidenceTable(data);
@@ -615,6 +743,10 @@ INTAKE_CONSOLE_HTML = """
       if (data.staged_artifact_id) setVal("staged_artifact_id", data.staged_artifact_id);
       if (data.id) setVal("source_job_id", data.id);
       if (data.source_job_id) setVal("source_job_id", data.source_job_id);
+      if (data.preview_id || data.candidates_preview) {
+        lastPreview = data;
+        renderSheetMapping(data);
+      }
     };
     const nonEmpty = value => value === "" ? null : value;
     const buildSourceEvidence = () => {
@@ -631,6 +763,8 @@ INTAKE_CONSOLE_HTML = """
       Object.keys(evidence).forEach(key => evidence[key] == null && delete evidence[key]);
       const warnings = metadataWarnings(evidence);
       if (warnings.length) evidence.metadata_warnings = warnings;
+      const sheets = readSheetMapping();
+      if (Object.keys(sheets).length) evidence.sheet_profiles = sheets;
       return evidence;
     };
     const metadataWarnings = evidence => {
@@ -761,10 +895,32 @@ INTAKE_CONSOLE_HTML = """
         verification_evidence_json: evidenceJson
       };
     };
-    const createVerification = async () => {
-      const data = await requestJson("/api/review/source-verifications", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(verificationPayload()) });
+    const createVerification = async (extra = {}) => {
+      const data = await requestJson("/api/review/source-verifications", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ ...verificationPayload(), ...extra }) });
       show(data, "none");
       mark("verified", "done");
+    };
+    const verifySheet = async (sheet, status = "verified") => {
+      readSheetMapping();
+      const profile = sheetProfiles[sheet] || {};
+      const row = document.querySelector(`[data-verify-sheet="${CSS.escape(sheet)}"]`);
+      const trust = row?.querySelector("[data-field='source_trust']")?.value || profile.source_trust || "third_party_unverified";
+      const verifiedBy = row?.querySelector("[data-field='verified_by']")?.value || profile.verified_by || val("verified_by");
+      const payload = {
+        source_sheet: sheet,
+        entity_name: profile.entity_hint || sheet,
+        source_url: profile.source_url || null,
+        source_origin: profile.source_origin || null,
+        official_referrer_url: profile.official_referrer_url || null,
+        evidence_shape: profile.evidence_shape || null,
+        verification_scope: "source_sheet",
+        verification_status: status,
+        source_trust: status === "rejected" ? "rejected" : trust,
+        verified_by: status === "pending" ? null : (verifiedBy || val("verified_by") || "console"),
+        verification_reason: status === "pending" ? "Sheet marked needs review." : `Sheet ${sheet} verified from current sheet mapping.`,
+        verification_evidence_json: { sheet_profile: profile }
+      };
+      return createVerification(payload);
     };
     document.getElementById("verifySource").onclick = async () => { try { await createVerification(); } catch (e) { mark("verified", "failed"); show({ error: e.message }); } };
     document.getElementById("rejectSource").onclick = async () => {
@@ -775,18 +931,60 @@ INTAKE_CONSOLE_HTML = """
       setVal("verification_source_trust", btn.dataset.trust); setVal("verification_status", "verified");
       try { await createVerification(); } catch (e) { mark("verified", "failed"); show({ error: e.message }); }
     });
+    document.getElementById("autoFillSheets").onclick = () => {
+      document.querySelectorAll("[data-sheet-row]").forEach(row => {
+        const sheet = row.dataset.sheetRow;
+        row.querySelector("[data-field='entity_hint']").value = sheet;
+      });
+      readSheetMapping();
+      renderSourceEvidence();
+      renderVerifySheets(lastPreview);
+    };
+    document.getElementById("applyGlobalSheets").onclick = () => {
+      document.querySelectorAll("[data-sheet-row]").forEach(row => {
+        for (const field of ["source_url", "source_origin", "official_referrer_url", "provenance_type", "evidence_shape", "operator_note"]) {
+          const globalId = field === "source_url" ? "meta_source_url" : field;
+          row.querySelector(`[data-field='${field}']`).value = val(globalId);
+        }
+      });
+      readSheetMapping();
+      renderSourceEvidence();
+      renderVerifySheets(lastPreview);
+    };
+    document.getElementById("importManifestSheets").onclick = () => {
+      sheetProfiles = lastPreview?.profile?.metadata?.sheet_profiles || {};
+      renderSheetMapping(lastPreview || {});
+      renderSourceEvidence();
+    };
+    document.getElementById("saveSheetMapping").onclick = () => { readSheetMapping(); renderSourceEvidence(); show({ sheet_profiles: sheetProfiles }, "none"); };
+    document.getElementById("previewWithSheetMapping").onclick = () => document.getElementById("preview").click();
+    document.getElementById("verifyAllSheets").onclick = async () => {
+      try {
+        for (const sheet of Object.keys(readSheetMapping())) await verifySheet(sheet, "verified");
+      } catch (e) { mark("verified", "failed"); show({ error: e.message }); }
+    };
+    document.addEventListener("click", async event => {
+      const verify = event.target.closest("[data-verify-sheet-button]");
+      const reject = event.target.closest("[data-reject-sheet-button]");
+      const review = event.target.closest("[data-review-sheet-button]");
+      try {
+        if (verify) await verifySheet(verify.dataset.verifySheetButton, "verified");
+        if (reject) await verifySheet(reject.dataset.rejectSheetButton, "rejected");
+        if (review) await verifySheet(review.dataset.reviewSheetButton, "pending");
+      } catch (e) { mark("verified", "failed"); show({ error: e.message }); }
+    });
     const reviewPost = async body => requestJson(body.path, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body.payload) });
     document.getElementById("auditJob").onclick = async () => { try { show(await reviewPost({ path: "/api/review/candidate-audit", payload: { source_job_id: Number(val("source_job_id")) || null } })); } catch (e) { show({ error: e.message }); } };
     document.getElementById("candidateGroups").onclick = async () => { try { show(await reviewPost({ path: "/api/review/candidate-groups", payload: { source_job_id: Number(val("source_job_id")) || null } })); } catch (e) { show({ error: e.message }); } };
-    const approve = async (dryRun, override) => {
-      const data = await reviewPost({ path: "/api/review/approve-candidate-groups", payload: { source_job_id: Number(val("source_job_id")) || null, dry_run: dryRun, allow_review_readiness: override || null, actor: val("verified_by") || "console" } });
+    const approve = async (dryRun, override, options = {}) => {
+      const data = await reviewPost({ path: "/api/review/approve-candidate-groups", payload: { source_job_id: Number(val("source_job_id")) || null, dry_run: dryRun, allow_review_readiness: override || null, actor: val("verified_by") || "console", source_snapshot_id: Number(options.source_snapshot_id || val("source_snapshot_id")) || null, new_only: Boolean(options.new_only) } });
       show(data, "none");
       if (!dryRun) renderApprovalSummary(data);
       if (!dryRun && Number(data.groups_approved || 0) > 0) mark("approved", "done");
     };
     let pendingApply = null;
-    const openApplyConfirm = (action, override) => {
-      pendingApply = { action, override };
+    const openApplyConfirm = (action, override, options = {}) => {
+      pendingApply = { action, override, options };
       setVal("confirmText", "");
       document.getElementById("confirmAction").textContent = action;
       document.getElementById("confirmSourceJobId").textContent = val("source_job_id") || "(all)";
@@ -803,7 +1001,8 @@ INTAKE_CONSOLE_HTML = """
       try {
         const apply = pendingApply;
         closeApplyConfirm();
-        await approve(false, apply.override);
+        if (apply.options?.mark_missing) await markMissing(false);
+        else await approve(false, apply.override, apply.options);
       } catch (e) { mark("approved", "failed"); show({ error: e.message }); }
     };
     document.getElementById("viewRegistry").onclick = async () => {
@@ -856,6 +1055,47 @@ INTAKE_CONSOLE_HTML = """
         show(data, "none");
       } catch (e) { show({ error: e.message }, "none"); }
     };
+    const createSnapshotPayload = () => ({
+      source_job_id: Number(val("source_job_id")),
+      snapshot_type: val("snapshot_type") || "reserve_snapshot",
+      snapshot_period: val("snapshot_period") || null,
+      snapshot_date: val("snapshot_date") || null,
+      previous_snapshot_id: Number(val("previous_snapshot_id")) || null,
+      created_by: val("snapshot_created_by") || val("created_by") || null,
+      metadata_json: buildSourceEvidence()
+    });
+    const runSnapshotDiff = async () => {
+      const data = await reviewPost({ path: "/api/review/source-snapshots/diff", payload: { source_job_id: Number(val("source_job_id")), source_snapshot_id: Number(val("source_snapshot_id")) || null } });
+      lastSnapshotDiff = data;
+      renderSnapshotSummary(data);
+      show(data, "none");
+      return data;
+    };
+    const renderSnapshotSample = key => {
+      const rows = lastSnapshotDiff?.samples?.[key] || [];
+      renderControlSections([{ title: key, rows, columns: searchCandidateColumns }]);
+      show({ [key]: rows }, "none");
+    };
+    document.getElementById("createSnapshot").onclick = async () => {
+      try {
+        const data = await reviewPost({ path: "/api/review/source-snapshots", payload: createSnapshotPayload() });
+        setVal("source_snapshot_id", data.id);
+        show(data, "none");
+      } catch (e) { show({ error: e.message }, "none"); }
+    };
+    document.getElementById("diffRegistry").onclick = async () => { try { await runSnapshotDiff(); } catch (e) { show({ error: e.message }, "none"); } };
+    document.getElementById("diffPrevious").onclick = async () => { try { await runSnapshotDiff(); } catch (e) { show({ error: e.message }, "none"); } };
+    document.getElementById("viewNewAddresses").onclick = () => renderSnapshotSample("new_address");
+    document.getElementById("viewUnchangedAddresses").onclick = () => renderSnapshotSample("unchanged_existing");
+    document.getElementById("viewMissingLatest").onclick = () => renderSnapshotSample("missing_in_latest");
+    document.getElementById("approveNewDry").onclick = async () => { try { await approve(true, null, { new_only: true, source_snapshot_id: Number(val("source_snapshot_id")) || null }); } catch (e) { show({ error: e.message }); } };
+    document.getElementById("approveNewApply").onclick = () => openApplyConfirm("Approve New Only Apply", null, { new_only: true, source_snapshot_id: Number(val("source_snapshot_id")) || null });
+    const markMissing = async dryRun => {
+      const data = await reviewPost({ path: "/api/review/source-snapshots/mark-missing", payload: { source_job_id: Number(val("source_job_id")), source_snapshot_id: Number(val("source_snapshot_id")), dry_run: dryRun } });
+      show(data, "none");
+    };
+    document.getElementById("markMissingDry").onclick = async () => { try { await markMissing(true); } catch (e) { show({ error: e.message }, "none"); } };
+    document.getElementById("markMissingApply").onclick = () => openApplyConfirm("Mark Missing As Stale Apply", null, { mark_missing: true });
     document.getElementById("approveReadyDry").onclick = async () => { try { await approve(true, null); } catch (e) { show({ error: e.message }); } };
     document.getElementById("approveReadyApply").onclick = () => openApplyConfirm("Approve Ready Groups Apply", null);
     document.getElementById("approveLowDry").onclick = async () => { try { await approve(true, "needs_review_official_low_confidence"); } catch (e) { show({ error: e.message }); } };

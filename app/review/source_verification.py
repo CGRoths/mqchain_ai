@@ -70,6 +70,7 @@ def record_source_verification(
     source_document_id: int | None = None,
     candidate_id: int | None = None,
     candidate_group_key: str | None = None,
+    source_sheet: str | None = None,
     entity_name: str | None = None,
     entity_id: int | None = None,
     protocol_name: str | None = None,
@@ -91,6 +92,7 @@ def record_source_verification(
         source_document_id=source_document_id,
         candidate_id=candidate_id,
         candidate_group_key=candidate_group_key,
+        source_sheet=source_sheet,
         entity_name=entity_name,
         entity_id=entity_id,
         protocol_name=protocol_name,
@@ -120,9 +122,24 @@ def find_source_verification_for_candidate(db: Session, candidate: AddressCandid
         queries.append(select(SourceVerification).where(SourceVerification.candidate_id == candidate.id))
     if group_key:
         queries.append(select(SourceVerification).where(SourceVerification.candidate_group_key == group_key))
-    if candidate.source_document_id is not None:
+    requires_sheet_verification = _requires_sheet_verification(candidate)
+    if candidate.source_document_id is not None and candidate.source_sheet:
+        queries.append(
+            select(SourceVerification).where(
+                SourceVerification.source_document_id == candidate.source_document_id,
+                SourceVerification.source_sheet == candidate.source_sheet,
+            )
+        )
+    if candidate.source_job_id is not None and candidate.source_sheet:
+        queries.append(
+            select(SourceVerification).where(
+                SourceVerification.source_job_id == candidate.source_job_id,
+                SourceVerification.source_sheet == candidate.source_sheet,
+            )
+        )
+    if not requires_sheet_verification and candidate.source_document_id is not None:
         queries.append(select(SourceVerification).where(SourceVerification.source_document_id == candidate.source_document_id))
-    if candidate.source_job_id is not None:
+    if not requires_sheet_verification and candidate.source_job_id is not None:
         queries.append(select(SourceVerification).where(SourceVerification.source_job_id == candidate.source_job_id))
     for stmt in queries:
         verification = db.scalars(stmt.order_by(SourceVerification.updated_at.desc(), SourceVerification.id.desc())).first()
@@ -159,6 +176,7 @@ def source_verification_payload(verification: SourceVerification | None) -> dict
         "source_document_id": verification.source_document_id,
         "candidate_id": verification.candidate_id,
         "candidate_group_key": verification.candidate_group_key,
+        "source_sheet": verification.source_sheet,
         "verification_scope": verification.verification_scope,
         "verification_status": verification.verification_status,
         "source_trust": verification.source_trust,
@@ -200,4 +218,25 @@ def build_candidate_group_key(candidate: AddressCandidate) -> str:
         },
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def _requires_sheet_verification(candidate: AddressCandidate) -> bool:
+    if not candidate.source_sheet:
+        return False
+    raw_reference = candidate.raw_reference if isinstance(candidate.raw_reference, dict) else {}
+    source_evidence = raw_reference.get("source_evidence") if isinstance(raw_reference.get("source_evidence"), dict) else {}
+    sheet_profiles = source_evidence.get("sheet_profiles") if isinstance(source_evidence.get("sheet_profiles"), dict) else {}
+    if sheet_profiles:
+        return True
+    return any(
+        raw_reference.get(key) not in {None, ""}
+        for key in (
+            "sheet_entity_hint",
+            "sheet_source_url",
+            "sheet_source_origin",
+            "sheet_provenance_type",
+            "sheet_evidence_shape",
+            "sheet_snapshot_date",
+        )
     )
