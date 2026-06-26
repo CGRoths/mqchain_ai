@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import replace
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -46,31 +47,40 @@ class IntakeOrchestrator:
         created_by: str | None = None,
         source_evidence: dict | None = None,
     ) -> dict:
+        normalized_evidence, evidence_warnings = _normalize_source_evidence(
+            source_evidence,
+            primary_source_url=source_url,
+            filename=None,
+        )
         raw_content = (pasted_text or "").encode("utf-8")
         final_url = source_url
         fetch_errors: list[str] = []
-        warnings: list[str] = []
+        warnings: list[str] = list(evidence_warnings)
         if source_url:
             try:
                 raw_content, final_url, fetched_type = await fetch_url_bytes(source_url)
                 content_type = fetched_type or content_type
+                sanitized_final_url, final_url_warnings = _sanitize_source_url(final_url or source_url)
+                normalized_evidence["source_url"] = sanitized_final_url
+                warnings.extend(final_url_warnings)
             except Exception:
                 if _is_github_structured_url(source_url):
                     warnings.append("github_prefetch_failed")
                 else:
                     fetch_errors.append("source_url_unreachable")
                 raw_content = b""
+        stored_source_url = normalized_evidence.get("source_url") or final_url
         artifact = SourceArtifact(
             input_method=input_method,
-            filename=Path(final_url or "").name or None,
-            source_url=final_url,
+            filename=Path(stored_source_url or "").name or None,
+            source_url=stored_source_url,
             pasted_text=pasted_text,
             content_type=content_type,
             raw_content_sample=raw_content[:4096],
             size_bytes=len(raw_content),
             requested_source_type=requested_source_type,
             created_by=created_by,
-            source_evidence=source_evidence or {},
+            source_evidence=normalized_evidence,
         )
         preview = self._build_preview(
             artifact,
@@ -92,6 +102,11 @@ class IntakeOrchestrator:
         created_by: str | None = None,
         source_evidence: dict | None = None,
     ) -> dict:
+        normalized_evidence, evidence_warnings = _normalize_source_evidence(
+            source_evidence,
+            primary_source_url=None,
+            filename=filename,
+        )
         staged = self._stage_artifact(
             filename=filename,
             content=content,
@@ -102,14 +117,15 @@ class IntakeOrchestrator:
             input_method="upload",
             filename=filename,
             local_file_path=staged.staged_path,
+            source_url=normalized_evidence.get("source_url"),
             content_type=content_type,
             raw_content_sample=content[:4096],
             size_bytes=len(content),
             requested_source_type=requested_source_type,
             created_by=created_by,
-            source_evidence=source_evidence or {},
+            source_evidence=normalized_evidence,
         )
-        preview = self._build_preview(artifact, content, staged_artifact_id=staged.id)
+        preview = self._build_preview(artifact, content, staged_artifact_id=staged.id, extra_warnings=evidence_warnings)
         self._persist_preview(preview)
         self.db.commit()
         return preview.to_response()
@@ -210,6 +226,11 @@ class IntakeOrchestrator:
                     "preview_id": job.preview_id,
                     "staged_artifact_id": job.staged_artifact_id,
                     "source_evidence": (artifact.source_evidence or {}),
+                    "source_origin": (artifact.source_evidence or {}).get("source_origin"),
+                    "official_referrer_url": (artifact.source_evidence or {}).get("official_referrer_url"),
+                    "provenance_type": (artifact.source_evidence or {}).get("provenance_type"),
+                    "evidence_shape": (artifact.source_evidence or {}).get("evidence_shape"),
+                    "operator_note": (artifact.source_evidence or {}).get("operator_note"),
                 },
             )
             self.db.add(source_document)
@@ -284,6 +305,7 @@ class IntakeOrchestrator:
                 profile = self._profile_from_parsed(fingerprint, parsed, candidates, warnings, fatal_errors)
             except Exception:
                 fatal_errors.append("parser_cannot_read_source")
+        profile = _profile_with_source_evidence(profile, artifact.source_evidence)
         return IntakePreview(
             preview_id=preview_id,
             staged_artifact_id=staged_artifact_id,
@@ -428,7 +450,11 @@ class IntakeOrchestrator:
 
     def _store_candidates(self, job: SourceJob, source_document: SourceDocument, candidates: list[CandidatePreview]) -> int:
         created = 0
+        source_evidence = dict((job.source_artifact_json or {}).get("source_evidence") or {})
         for item in candidates:
+            raw_reference = dict(item.raw_reference or {})
+            if source_evidence and "source_evidence" not in raw_reference:
+                raw_reference["source_evidence"] = source_evidence
             candidate = AddressCandidate(
                 source_job_id=job.id,
                 source_document_id=source_document.id,
@@ -452,7 +478,7 @@ class IntakeOrchestrator:
                 file_path=item.file_path,
                 evidence_type=item.evidence_type,
                 warnings=item.warnings,
-                raw_reference=item.raw_reference,
+                raw_reference=raw_reference,
             )
             self.db.add(candidate)
             self.db.flush()
@@ -508,6 +534,7 @@ class IntakeOrchestrator:
                 "row_number": item.source_row,
                 "page_number": item.source_page,
                 "raw_reference": item.raw_reference,
+                "source_evidence": dict((job.source_artifact_json or {}).get("source_evidence") or {}),
                 "parser_warnings": item.warnings,
             },
             confidence_reason="structured_network_column" if item.source_network else "address_pattern_fallback",
@@ -519,6 +546,118 @@ class IntakeOrchestrator:
 def _safe_filename(value: str) -> str:
     name = Path(value).name or "source-upload"
     return re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "source-upload"
+
+
+SAFE_SOURCE_URL_QUERY_PARAMS = {"address", "chain", "id", "network", "page", "slug", "tab"}
+SENSITIVE_SOURCE_URL_QUERY_PARAMS = {"api_key", "apikey", "access_key", "access_token", "auth", "key", "secret", "signature", "token"}
+KNOWN_ENTITY_TOKENS = {
+    "aave",
+    "binance",
+    "bitfinex",
+    "bitget",
+    "bitmex",
+    "bybit",
+    "coinbase",
+    "coinex",
+    "deribit",
+    "huobi",
+    "htx",
+    "indodax",
+    "kraken",
+    "okx",
+}
+SOURCE_ORIGIN_ALIASES = {
+    "cmc": "coinmarketcap",
+    "coinmarketcap": "coinmarketcap",
+}
+
+
+def _normalize_source_evidence(source_evidence: dict | None, *, primary_source_url: str | None, filename: str | None) -> tuple[dict, list[str]]:
+    evidence = {str(key): value for key, value in (source_evidence or {}).items() if value is not None and value != ""}
+    if "operator_notes" in evidence and "operator_note" not in evidence:
+        evidence["operator_note"] = evidence["operator_notes"]
+    source_url = evidence.get("source_url") or primary_source_url
+    warnings: list[str] = []
+    if source_url:
+        sanitized, url_warnings = _sanitize_source_url(str(source_url))
+        evidence["source_url"] = sanitized
+        warnings.extend(url_warnings)
+    warnings.extend(_provenance_warnings(evidence, filename=filename))
+    warnings = _dedupe(warnings)
+    if warnings:
+        evidence["provenance_warnings"] = warnings
+    return evidence, warnings
+
+
+def _sanitize_source_url(value: str) -> tuple[str, list[str]]:
+    parsed = urlparse(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return value.strip(), []
+    kept: list[tuple[str, str]] = []
+    removed = False
+    for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized_key = key.strip().lower()
+        if normalized_key in SAFE_SOURCE_URL_QUERY_PARAMS and normalized_key not in SENSITIVE_SOURCE_URL_QUERY_PARAMS:
+            kept.append((key, item))
+        elif normalized_key:
+            removed = True
+    sanitized = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(kept), ""))
+    return sanitized, ["source_url_query_params_removed"] if removed else []
+
+
+def _provenance_warnings(evidence: dict, *, filename: str | None) -> list[str]:
+    warnings: list[str] = []
+    source_url = str(evidence.get("source_url") or "")
+    entity_hint = str(evidence.get("entity_hint") or "")
+    source_origin = str(evidence.get("source_origin") or "")
+    entity_slug = _slug_token(entity_hint)
+    origin_slug = _origin_slug(source_origin)
+    host_root = _domain_root(source_url)
+
+    filename_tokens = _text_tokens(filename)
+    filename_entities = {token for token in filename_tokens if token in KNOWN_ENTITY_TOKENS}
+    if entity_slug and filename_entities and entity_slug not in filename_entities:
+        warnings.append("filename_entity_may_conflict_with_entity_hint")
+    if source_origin and host_root and origin_slug and origin_slug not in _host_aliases(host_root):
+        warnings.append("claimed_official_origin_does_not_match_source_url")
+    if entity_slug and host_root in KNOWN_ENTITY_TOKENS and host_root != entity_slug and host_root != origin_slug:
+        warnings.append("source_url_identity_may_conflict_with_entity_hint")
+    return warnings
+
+
+def _profile_with_source_evidence(profile: IntakeProfile, source_evidence: dict) -> IntakeProfile:
+    metadata = {**(profile.metadata or {}), "source_evidence": source_evidence or {}}
+    for key in ("source_url", "source_origin", "official_referrer_url", "provenance_type", "evidence_shape", "operator_note"):
+        if key in (source_evidence or {}):
+            metadata[key] = source_evidence[key]
+    return replace(profile, metadata=metadata)
+
+
+def _text_tokens(value: str | None) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", str(value or "").lower()) if token}
+
+
+def _slug_token(value: str | None) -> str:
+    return next((token for token in re.split(r"[^a-z0-9]+", str(value or "").lower()) if token), "")
+
+
+def _origin_slug(value: str | None) -> str:
+    slug = _slug_token(value)
+    return SOURCE_ORIGIN_ALIASES.get(slug, slug)
+
+
+def _domain_root(source_url: str | None) -> str:
+    host = urlparse(source_url or "").netloc.lower().removeprefix("www.")
+    parts = [part for part in host.split(".") if part]
+    return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+
+
+def _host_aliases(host_root: str) -> set[str]:
+    aliases = {host_root}
+    for alias, canonical in SOURCE_ORIGIN_ALIASES.items():
+        if canonical == host_root:
+            aliases.add(alias)
+    return aliases
 
 
 def _is_github_structured_url(source_url: str | None) -> bool:

@@ -596,6 +596,22 @@ def _source_evidence_block(
     explicit = raw_row.raw_row.get("source_evidence")
     source_evidence = dict(explicit) if isinstance(explicit, dict) else {}
     extra_context = source_evidence.get("extra_context") if isinstance(source_evidence.get("extra_context"), dict) else {}
+    preserved_context = {
+        key: value
+        for key, value in source_evidence.items()
+        if key
+        in {
+            "evidence_shape",
+            "official_referrer_url",
+            "operator_note",
+            "provenance_type",
+            "provenance_warnings",
+            "source_origin",
+            "source_url",
+        }
+        and value is not None
+        and value != ""
+    }
     return SourceEvidenceBlock(
         source_url=_first_present(source_evidence.get("source_url"), raw_row.source_url),
         source_name=_first_present(source_evidence.get("source_name"), _raw_get(raw_row.raw_row, "source_name", "Source Name")),
@@ -614,9 +630,10 @@ def _source_evidence_block(
         source_url_domain=_first_present(source_evidence.get("source_url_domain"), _raw_get(raw_row.raw_row, "source_url_domain")),
         retrieved_at=_first_present(source_evidence.get("retrieved_at"), _raw_get(raw_row.raw_row, "retrieved_at")),
         manual_verification=_first_present(source_evidence.get("manual_verification"), _raw_get(raw_row.raw_row, "manual_verification")),
-        operator_notes=_first_present(source_evidence.get("operator_notes"), _raw_get(raw_row.raw_row, "operator_notes", "notes")),
+        operator_notes=_first_present(source_evidence.get("operator_note"), source_evidence.get("operator_notes"), _raw_get(raw_row.raw_row, "operator_notes", "notes")),
         extra_context={
             **extra_context,
+            **preserved_context,
             "source_document_key": raw_row.source_document_key,
             "source_file_path": raw_row.source_file_path,
             "raw_row": raw_row.raw_row,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 from io import BytesIO
@@ -18,7 +19,7 @@ from app.ingestion.github_source_resolver import github_blob_to_raw_url
 from app.ingestion.intake_orchestrator import IntakeOrchestrator
 from app.ingestion.source_adapters import _layout_wallet_rows_from_page
 from app.ingestion.solidity_address_extractor import extract_solidity_deployment_table
-from app.models.intake import AddressCandidate, AddressEvidence, SourceJob
+from app.models.intake import AddressCandidate, AddressEvidence, SourceDocument, SourceJob, SourceVerification
 from app.services.registry_service import RegistryPromotionService
 from app.main import app
 
@@ -57,10 +58,21 @@ def _xlsx_bytes(sheets: dict[str, list[list[str]]]) -> bytes:
     return stream.getvalue()
 
 
-def _upload_preview(client: TestClient, filename: str, content: bytes, requested_source_type: str | None = None) -> dict:
+def _upload_preview(
+    client: TestClient,
+    filename: str,
+    content: bytes,
+    requested_source_type: str | None = None,
+    source_evidence: dict | None = None,
+    created_by: str | None = None,
+) -> dict:
     data = {}
     if requested_source_type:
         data["requested_source_type"] = requested_source_type
+    if source_evidence is not None:
+        data["source_evidence_json"] = json.dumps(source_evidence)
+    if created_by:
+        data["created_by"] = created_by
     response = client.post(
         "/api/intake/upload/preview",
         files={"file": (filename, content, "application/octet-stream")},
@@ -78,14 +90,43 @@ def _url_preview(
     content: str,
     content_type: str = "text/html",
     input_method: str = "url",
+    source_evidence: dict | None = None,
+    requested_source_type: str | None = None,
 ) -> dict:
     async def fake_fetch(url: str):
         return content.encode("utf-8"), url, content_type
 
     monkeypatch.setattr("app.ingestion.intake_orchestrator.fetch_url_bytes", fake_fetch)
-    response = client.post("/api/intake/preview", json={"input_method": input_method, "source_url": source_url})
+    payload = {"input_method": input_method, "source_url": source_url}
+    if source_evidence is not None:
+        payload["source_evidence"] = source_evidence
+    if requested_source_type is not None:
+        payload["requested_source_type"] = requested_source_type
+    response = client.post("/api/intake/preview", json=payload)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _cmc_indodax_source_evidence(source_url: str = "https://coinmarketcap.com/exchanges/indodax/") -> dict[str, str]:
+    return {
+        "entity_hint": "Indodax",
+        "source_origin": "CoinMarketCap",
+        "source_url": source_url,
+        "provenance_type": "third_party_reserve_snapshot",
+        "evidence_shape": "processed_excel_wallet_list",
+        "operator_note": "Generated from CMC API script for Indodax reserve capture.",
+    }
+
+
+def _indodax_xlsx() -> bytes:
+    return _xlsx_bytes(
+        {
+            "Indodax": [
+                ["Entity", "Network", "Address", "Wallet Label / Role", "Evidence Type"],
+                ["Indodax", "Ethereum", "0x1111111111111111111111111111111111111111", "Reserve Wallet", "reserve_snapshot"],
+            ]
+        }
+    )
 
 
 def test_health_routes_exist(client: TestClient) -> None:
@@ -124,6 +165,191 @@ def test_upload_preview_returns_preview_id_and_staged_artifact_id(client: TestCl
     assert preview["preview_id"]
     assert preview["staged_artifact_id"]
     assert preview["can_save_job"] is True
+
+
+def test_upload_preview_with_source_evidence_preserves_metadata(client: TestClient) -> None:
+    source_evidence = _cmc_indodax_source_evidence()
+    preview = _upload_preview(
+        client,
+        "indodax_cmc_reserve_snapshot.xlsx",
+        _indodax_xlsx(),
+        requested_source_type="excel_upload",
+        source_evidence=source_evidence,
+        created_by="CRAY",
+    )
+
+    stored = preview["artifact"]["source_evidence"]
+    for key, value in source_evidence.items():
+        assert stored[key] == value
+        assert preview["profile"]["metadata"]["source_evidence"][key] == value
+    assert preview["artifact"]["source_url"] == source_evidence["source_url"]
+    assert preview["profile"]["metadata"]["source_origin"] == "CoinMarketCap"
+    assert preview["profile"]["metadata"]["evidence_shape"] == "processed_excel_wallet_list"
+    assert "filename_entity_may_conflict_with_entity_hint" not in preview["warnings"]
+    assert preview["can_save_job"] is True
+
+
+def test_url_preview_with_source_evidence_preserves_metadata(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_evidence = _cmc_indodax_source_evidence()
+    preview = _url_preview(
+        client,
+        monkeypatch,
+        source_url="https://coinmarketcap.com/exchanges/indodax/",
+        content="<html><body><h1>Indodax reserves</h1></body></html>",
+        source_evidence=source_evidence,
+    )
+
+    assert preview["artifact"]["source_evidence"]["source_origin"] == "CoinMarketCap"
+    assert preview["profile"]["metadata"]["source_evidence"]["entity_hint"] == "Indodax"
+    assert preview["profile"]["metadata"]["source_url"] == "https://coinmarketcap.com/exchanges/indodax/"
+    assert "filename_entity_may_conflict_with_entity_hint" not in preview["warnings"]
+
+
+def test_url_preview_sanitizes_primary_source_url_query_params(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    preview = _url_preview(
+        client,
+        monkeypatch,
+        source_url="https://api.coinmarketcap.com/v1/reserves?api_key=secret&slug=indodax&page=1",
+        content="<html><body>Indodax reserves</body></html>",
+    )
+    assert preview["artifact"]["source_url"] == "https://api.coinmarketcap.com/v1/reserves?slug=indodax&page=1"
+    assert preview["profile"]["metadata"]["source_evidence"]["source_url"] == preview["artifact"]["source_url"]
+    assert "api_key=secret" not in json.dumps(preview["artifact"])
+    assert "source_url_query_params_removed" in preview["warnings"]
+
+
+def test_upload_job_with_source_evidence_preserves_metadata_in_source_job(client: TestClient) -> None:
+    source_evidence = _cmc_indodax_source_evidence()
+    response = client.post(
+        "/api/intake/upload/jobs",
+        files={"file": ("indodax_cmc_reserve_snapshot.xlsx", _indodax_xlsx(), "application/octet-stream")},
+        data={
+            "requested_source_type": "excel_upload",
+            "created_by": "CRAY",
+            "source_evidence_json": json.dumps(source_evidence),
+        },
+    )
+    assert response.status_code == 200, response.text
+    job_id = response.json()["id"]
+
+    with SessionLocal() as db:
+        stored = db.get(SourceJob, job_id)
+        assert stored is not None
+        assert stored.source_url == source_evidence["source_url"]
+        assert stored.created_by == "CRAY"
+        assert stored.source_artifact_json["source_evidence"]["source_origin"] == "CoinMarketCap"
+        assert stored.profile_json["metadata"]["source_evidence"]["entity_hint"] == "Indodax"
+        assert stored.preview_json["artifact"]["source_evidence"]["evidence_shape"] == "processed_excel_wallet_list"
+
+
+def test_excel_upload_run_preserves_source_evidence_to_documents_candidates_and_evidence(client: TestClient) -> None:
+    source_evidence = _cmc_indodax_source_evidence()
+    job = client.post(
+        "/api/intake/upload/jobs",
+        files={"file": ("indodax_cmc_reserve_snapshot.xlsx", _indodax_xlsx(), "application/octet-stream")},
+        data={"source_evidence_json": json.dumps(source_evidence), "requested_source_type": "excel_upload"},
+    ).json()
+
+    run = client.post(f"/api/intake/jobs/{job['id']}/run")
+    assert run.status_code == 200, run.text
+    assert run.json()["extracted_candidates"] == 1
+
+    candidates = client.get(f"/api/intake/jobs/{job['id']}/candidates").json()
+    evidence = client.get(f"/api/intake/jobs/{job['id']}/evidence").json()
+    documents = client.get(f"/api/intake/jobs/{job['id']}/documents").json()
+    assert candidates
+    assert evidence
+    assert documents
+    assert documents[0]["metadata_json"]["source_origin"] == "CoinMarketCap"
+    assert documents[0]["metadata_json"]["source_evidence"]["operator_note"] == source_evidence["operator_note"]
+    assert evidence[0]["payload"]["source_evidence"]["provenance_type"] == "third_party_reserve_snapshot"
+    assert evidence[0]["payload"]["source_evidence"]["source_url"] == source_evidence["source_url"]
+    assert "CoinMarketCap" in json.dumps(candidates[0]["raw_reference"])
+
+    with SessionLocal() as db:
+        document = db.scalars(select(SourceDocument).where(SourceDocument.source_job_id == job["id"])).first()
+        assert document is not None
+        assert document.metadata_json["evidence_shape"] == "processed_excel_wallet_list"
+
+
+def test_source_evidence_valid_cmc_indodax_case_has_no_conflict_warning(client: TestClient) -> None:
+    preview = _upload_preview(
+        client,
+        "indodax_cmc_reserve_snapshot.xlsx",
+        _indodax_xlsx(),
+        source_evidence=_cmc_indodax_source_evidence(),
+    )
+    assert preview["can_save_job"] is True
+    assert "filename_entity_may_conflict_with_entity_hint" not in preview["warnings"]
+    assert "claimed_official_origin_does_not_match_source_url" not in preview["warnings"]
+    assert "source_url_identity_may_conflict_with_entity_hint" not in preview["warnings"]
+
+
+def test_source_evidence_filename_entity_conflict_warns_but_does_not_block(client: TestClient) -> None:
+    preview = _upload_preview(
+        client,
+        "binance_reserves.xlsx",
+        _indodax_xlsx(),
+        source_evidence=_cmc_indodax_source_evidence(),
+    )
+    assert preview["can_save_job"] is True
+    assert "filename_entity_may_conflict_with_entity_hint" in preview["warnings"]
+
+
+def test_source_evidence_url_query_params_are_sanitized(client: TestClient) -> None:
+    source_evidence = _cmc_indodax_source_evidence(
+        "https://api.coinmarketcap.com/v1/reserves?api_key=secret&slug=indodax&page=1"
+    )
+    preview = _upload_preview(
+        client,
+        "indodax_cmc_reserve_snapshot.xlsx",
+        _indodax_xlsx(),
+        source_evidence=source_evidence,
+    )
+    assert preview["artifact"]["source_url"] == "https://api.coinmarketcap.com/v1/reserves?slug=indodax&page=1"
+    assert "api_key=secret" not in json.dumps(preview["artifact"])
+    assert "source_url_query_params_removed" in preview["warnings"]
+
+
+def test_upload_source_evidence_invalid_json_returns_clean_400(client: TestClient) -> None:
+    response = client.post(
+        "/api/intake/upload/preview",
+        files={"file": ("wallets.csv", b"Entity,Network,Address\n", "text/csv")},
+        data={"source_evidence_json": '{"entity_hint":'},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["fatal_errors"] == ["source_evidence_json_invalid"]
+
+
+def test_source_verification_endpoint_creates_record_with_verified_by_and_verified_at(client: TestClient) -> None:
+    payload = {
+        "source_job_id": 123,
+        "entity_name": "Indodax",
+        "source_url": "https://coinmarketcap.com/exchanges/indodax/",
+        "source_origin": "CoinMarketCap",
+        "input_method": "upload_file",
+        "evidence_shape": "processed_excel_wallet_list",
+        "verification_scope": "source_job",
+        "verification_status": "verified",
+        "source_trust": "third_party_exchange_reported",
+        "verified_by": "CRAY",
+        "verification_reason": "CMC exchange reserves data generated from API and manually mapped to Indodax.",
+        "verification_evidence_json": {"reviewed_rows": 1},
+    }
+    response = client.post("/api/review/source-verifications", json=payload)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"]
+    assert body["verified_by"] == "CRAY"
+    assert body["verified_at"]
+    assert body["source_trust"] == "third_party_exchange_reported"
+
+    with SessionLocal() as db:
+        stored = db.get(SourceVerification, body["id"])
+        assert stored is not None
+        assert stored.verified_by == "CRAY"
+        assert stored.verified_at is not None
+        assert stored.verification_evidence_json == {"reviewed_rows": 1}
 
 
 def test_save_from_preview_reuses_staged_artifact_and_snapshot(client: TestClient) -> None:
@@ -1117,7 +1343,11 @@ def test_intake_console_and_input_window_behavior(client: TestClient) -> None:
     html = client.get("/intake-console").text
     assert "MQCHAIN Intake Console" in html
     assert 'accept=".pdf,.csv,.xlsx,.xls,.txt,.md,.json,.yaml,.yml"' in html
-    assert "Candidate preview table" in html
+    assert "Advanced Source Metadata" in html
+    assert "Source Evidence JSON" in html
+    assert "Source Verification" in html
+    assert "/api/review/source-verifications" in html
+    assert "/api/review/candidate-groups" in html
     assert "candidateTableWrap" in html
     assert "Evidence table" in html
     assert "evidenceTableWrap" in html
