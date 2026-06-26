@@ -190,8 +190,16 @@ INTAKE_CONSOLE_HTML = """
     .json-preview { min-height: 150px; max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 10px; border-radius: 8px; background: #101820; color: #e8eef3; white-space: pre-wrap; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
     pre { min-height: 280px; max-height: 70vh; overflow: auto; margin: 0; padding: 12px; border-radius: 8px; background: #101820; color: #e8eef3; white-space: pre-wrap; }
     .warning-list { color: var(--warn); margin: 8px 0; padding-left: 18px; }
+    .control-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; align-items: end; }
+    .summary-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 12px; }
+    .summary-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #fbfcfd; min-height: 54px; }
+    .summary-card span { display: block; color: var(--muted); font-size: 12px; }
+    .summary-card strong { display: block; margin-top: 3px; overflow-wrap: anywhere; }
+    .danger-apply { border-color: var(--danger); color: var(--danger); font-weight: 650; }
+    .modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(18, 32, 39, 0.56); padding: 16px; z-index: 20; }
+    .modal { width: min(520px, 100%); background: #fff; border-radius: 8px; border: 1px solid var(--line); padding: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22); }
     [hidden] { display: none !important; }
-    @media (max-width: 960px) { main { grid-template-columns: 1fr; } .tabs, .grid, .status-flow, .two { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 960px) { main { grid-template-columns: 1fr; } .tabs, .grid, .status-flow, .two, .control-filters, .summary-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   </style>
 </head>
 <body>
@@ -317,17 +325,68 @@ INTAKE_CONSOLE_HTML = """
         <button type="button" id="auditJob">Audit Source Job</button>
         <button type="button" id="candidateGroups">Get Candidate Groups</button>
         <button type="button" id="approveReadyDry">Approve Ready Groups Dry Run</button>
-        <button type="button" id="approveReadyApply" class="primary">Approve Ready Groups Apply</button>
+        <button type="button" id="approveReadyApply" class="danger-apply">Approve Ready Groups Apply</button>
         <button type="button" id="approveLowDry">Approve Low Confidence Override Dry Run</button>
-        <button type="button" id="approveLowApply" class="primary">Approve Low Confidence Override Apply</button>
+        <button type="button" id="approveLowApply" class="danger-apply">Approve Low Confidence Override Apply</button>
         <button type="button" id="approveHotColdDry">Approve Hot/Cold Override Dry Run</button>
-        <button type="button" id="approveHotColdApply" class="primary">Approve Hot/Cold Override Apply</button>
+        <button type="button" id="approveHotColdApply" class="danger-apply">Approve Hot/Cold Override Apply</button>
       </div>
+      <div id="approvalSummary" class="summary-cards" hidden></div>
+
+      <h2>Review Data</h2>
+      <label>Search address / entity / chain<input id="global_search_query" placeholder="0x..., Bybit, ethereum"></label>
+      <div class="actions">
+        <button type="button" id="globalSearch" class="primary">Search</button>
+      </div>
+      <details>
+        <summary>Approved Registry Viewer</summary>
+        <div class="control-filters">
+          <label>Entity<input id="registry_entity_name"></label>
+          <label>Chain<input id="registry_chain_slug"></label>
+          <label>Address Class<input id="registry_address_class"></label>
+          <label>Role<input id="registry_role"></label>
+        </div>
+        <div class="actions"><button type="button" id="viewRegistry">View Approved Registry</button></div>
+      </details>
+      <details>
+        <summary>Source Verification Viewer</summary>
+        <div class="control-filters">
+          <label>Source Job ID<input id="verification_filter_source_job_id" type="number"></label>
+          <label>Entity<input id="verification_filter_entity_name"></label>
+          <label>Source Trust<input id="verification_filter_source_trust"></label>
+          <label>Status<input id="verification_filter_status"></label>
+        </div>
+        <div class="actions"><button type="button" id="viewSourceVerifications">View Source Verifications</button></div>
+      </details>
+      <details>
+        <summary>Approval Event Viewer</summary>
+        <div class="control-filters">
+          <label>Source Job ID<input id="event_filter_source_job_id" type="number"></label>
+          <label>Candidate Group Key<input id="event_filter_candidate_group_key"></label>
+          <label>Action<input id="event_filter_action"></label>
+          <label>Actor<input id="event_filter_actor"></label>
+          <label>Limit<input id="event_filter_limit" type="number" value="100"></label>
+        </div>
+        <div class="actions"><button type="button" id="viewApprovalEvents">View Approval Events</button></div>
+      </details>
+      <div id="controlResults"></div>
 
       <h2>Raw JSON Output</h2>
       <pre id="output">{}</pre>
     </section>
   </main>
+  <div id="confirmModal" class="modal-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h2 id="confirmTitle">Confirm Approval Apply</h2>
+      <p>Action: <strong id="confirmAction">-</strong></p>
+      <p>Source Job ID: <strong id="confirmSourceJobId">-</strong></p>
+      <label>Type APPROVE to continue<input id="confirmText"></label>
+      <div class="actions">
+        <button type="button" id="confirmCancel">Cancel</button>
+        <button type="button" id="confirmApply" class="danger-apply">Send Apply Request</button>
+      </div>
+    </div>
+  </div>
   <script>
     let mode = "upload";
     const workflow = {
@@ -357,6 +416,30 @@ INTAKE_CONSOLE_HTML = """
     const cell = value => String(value ?? "-").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     const compactJson = value => JSON.stringify(value ?? {}, null, 0).slice(0, 360);
     const copyButton = value => `<button type="button" class="small" data-copy="${cell(value)}">Copy</button>`;
+    const knownEntities = ["aave", "binance", "bitfinex", "bitget", "bitmex", "bybit", "coinbase", "coinex", "deribit", "huobi", "htx", "indodax", "kraken", "kucoin", "mexc", "okx"];
+    const originAliases = { cmc: "coinmarketcap", coinmarketcap: "coinmarketcap" };
+    const tokens = value => String(value || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const firstKnownEntity = value => tokens(value).find(token => knownEntities.includes(token)) || "";
+    const slug = value => tokens(value)[0] || "";
+    const originSlug = value => originAliases[slug(value)] || slug(value);
+    const domainRoot = sourceUrl => {
+      try {
+        const parts = new URL(sourceUrl || "http://local").hostname.replace(/^www\\./, "").toLowerCase().split(".").filter(Boolean);
+        return parts.length >= 2 ? parts[parts.length - 2] : (parts[0] || "");
+      } catch { return ""; }
+    };
+    const hostAliases = root => new Set([root, ...Object.entries(originAliases).filter(([, canonical]) => canonical === root).map(([alias]) => alias)]);
+    const queryString = params => {
+      const search = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== null && value !== undefined && String(value).trim() !== "") search.set(key, String(value).trim());
+      });
+      return search.toString();
+    };
+    const getJson = async (url, params = {}) => {
+      const qs = queryString(params);
+      return requestJson(`${url}${qs ? "?" + qs : ""}`);
+    };
     const mark = (key, status) => { workflow[key] = status; renderWorkflow(); };
     const renderWorkflow = () => {
       document.getElementById("statusFlow").innerHTML = Object.entries(workflowLabels).map(([key, label]) => `
@@ -434,8 +517,93 @@ INTAKE_CONSOLE_HTML = """
         </tr>
       `).join("");
     };
+    const renderControlSections = sections => {
+      document.getElementById("controlResults").innerHTML = sections.map(section => {
+        const rows = Array.isArray(section.rows) ? section.rows : [];
+        const body = rows.length ? rows.map(item => `
+          <tr>${section.columns.map(column => `<td>${cell(column.render ? column.render(item) : item[column.key])}</td>`).join("")}</tr>
+        `).join("") : `<tr><td colspan="${section.columns.length}">No rows found</td></tr>`;
+        return `
+          <h3>${cell(section.title)} (${rows.length})</h3>
+          <div class="table-scroll"><table class="candidate-table" aria-label="${cell(section.title)}">
+            <thead><tr>${section.columns.map(column => `<th>${cell(column.label)}</th>`).join("")}</tr></thead>
+            <tbody>${body}</tbody>
+          </table></div>
+        `;
+      }).join("");
+    };
+    const registryColumns = [
+      { key: "entity_name", label: "Entity" },
+      { key: "chain_slug", label: "Chain" },
+      { key: "address", label: "Address" },
+      { key: "normalized_address", label: "Normalized" },
+      { key: "address_class", label: "Address Class" },
+      { key: "role", label: "Role" },
+      { key: "source_trust_status", label: "Source Trust" },
+      { key: "confidence_score", label: "Confidence" },
+      { key: "evidence_count", label: "Evidence" },
+      { key: "first_approved_at", label: "First Approved" },
+    ];
+    const verificationColumns = [
+      { key: "id", label: "ID" },
+      { key: "source_job_id", label: "Source Job" },
+      { key: "entity_name", label: "Entity" },
+      { key: "source_origin", label: "Origin" },
+      { key: "source_url", label: "Source URL" },
+      { key: "evidence_shape", label: "Evidence Shape" },
+      { key: "verification_scope", label: "Scope" },
+      { key: "verification_status", label: "Status" },
+      { key: "source_trust", label: "Source Trust" },
+      { key: "verified_by", label: "Verified By" },
+      { key: "verified_at", label: "Verified At" },
+      { key: "verification_reason", label: "Reason" },
+    ];
+    const eventColumns = [
+      { key: "id", label: "ID" },
+      { key: "approved_address_id", label: "Approved Address" },
+      { key: "candidate_group_key", label: "Candidate Group" },
+      { key: "action", label: "Action" },
+      { key: "actor", label: "Actor" },
+      { key: "reason", label: "Reason" },
+      { key: "dry_run", label: "Dry Run" },
+      { key: "created_at", label: "Created" },
+      { key: "payload_json", label: "Payload", render: item => compactJson(item.payload_json) },
+    ];
+    const searchCandidateColumns = [
+      { key: "id", label: "Candidate ID" },
+      { key: "source_job_id", label: "Source Job" },
+      { key: "entity_name", label: "Entity" },
+      { key: "chain_slug", label: "Chain" },
+      { key: "address", label: "Address" },
+      { key: "suggested_role", label: "Role" },
+      { key: "status", label: "Status" },
+      { key: "confidence_initial", label: "Confidence" },
+      { key: "evidence_type", label: "Evidence Type" },
+    ];
+    const searchEvidenceColumns = [
+      { key: "id", label: "Evidence ID" },
+      { key: "candidate_id", label: "Candidate" },
+      { key: "source_job_id", label: "Source Job" },
+      { key: "entity_name", label: "Entity" },
+      { key: "chain_slug", label: "Chain" },
+      { key: "address", label: "Address" },
+      { key: "evidence_type", label: "Evidence Type" },
+      { key: "source_type", label: "Source Type" },
+      { key: "source_url", label: "Source URL" },
+      { key: "file_path", label: "File Path" },
+      { key: "payload_preview", label: "Payload", render: item => compactJson(item.payload_preview) },
+    ];
+    const renderApprovalSummary = data => {
+      const keys = ["groups_scanned", "groups_approved", "addresses_created", "roles_created", "evidence_linked", "events_written", "skipped_reasons"];
+      const summary = document.getElementById("approvalSummary");
+      summary.hidden = false;
+      summary.innerHTML = keys.map(key => `
+        <div class="summary-card"><span>${cell(key)}</span><strong>${cell(key === "skipped_reasons" ? compactJson(data[key] || {}) : data[key])}</strong></div>
+      `).join("");
+    };
     const show = (data, view = "candidates") => {
-      if (view === "evidence") renderEvidenceTable(data);
+      if (view === "none") hideTables();
+      else if (view === "evidence") renderEvidenceTable(data);
       else if (view === "documents") renderDocumentTable(data);
       else renderCandidateTable(data);
       output.textContent = JSON.stringify(data, null, 2);
@@ -461,23 +629,27 @@ INTAKE_CONSOLE_HTML = """
         operator_note: nonEmpty(val("operator_note"))
       };
       Object.keys(evidence).forEach(key => evidence[key] == null && delete evidence[key]);
+      const warnings = metadataWarnings(evidence);
+      if (warnings.length) evidence.metadata_warnings = warnings;
       return evidence;
     };
     const metadataWarnings = evidence => {
       const warnings = [];
-      const filename = document.getElementById("file").files[0]?.name?.toLowerCase() || "";
-      const entity = (evidence.entity_hint || "").toLowerCase();
-      const origin = (evidence.source_origin || "").toLowerCase();
-      const host = (() => { try { return new URL(evidence.source_url || "http://local").hostname.replace(/^www\\./, "").toLowerCase(); } catch { return ""; } })();
-      if (filename.includes("binance") && entity && !entity.includes("binance")) warnings.push("filename_entity_may_conflict_with_entity_hint");
-      if (origin.includes("binance") && host && !host.includes("binance")) warnings.push("claimed_official_origin_does_not_match_source_url");
-      if (host.includes("indodax.com") && entity && !entity.includes("indodax")) warnings.push("source_url_identity_may_conflict_with_entity_hint");
+      const filenameEntity = firstKnownEntity(document.getElementById("file").files[0]?.name || "");
+      const noteEntity = firstKnownEntity(evidence.operator_note || "");
+      const entity = firstKnownEntity(evidence.entity_hint || "") || slug(evidence.entity_hint || "");
+      const origin = originSlug(evidence.source_origin || "");
+      const root = domainRoot(evidence.source_url || "");
+      if (filenameEntity && entity && filenameEntity !== entity) warnings.push("filename_entity_may_conflict_with_entity_hint");
+      if (noteEntity && entity && noteEntity !== entity) warnings.push("operator_note_entity_may_conflict_with_entity_hint");
+      if (origin && root && !hostAliases(root).has(origin)) warnings.push("claimed_official_origin_does_not_match_source_url");
+      if (root && knownEntities.includes(root) && entity && root !== entity && root !== origin) warnings.push("source_url_identity_may_conflict_with_entity_hint");
       return warnings;
     };
     const renderSourceEvidence = () => {
       const evidence = buildSourceEvidence();
       document.getElementById("sourceEvidencePreview").textContent = JSON.stringify(evidence, null, 2);
-      const warnings = metadataWarnings(evidence);
+      const warnings = evidence.metadata_warnings || [];
       const list = document.getElementById("provenanceWarnings");
       list.hidden = warnings.length === 0;
       list.innerHTML = warnings.map(warning => `<li>${cell(warning)}</li>`).join("");
@@ -609,14 +781,87 @@ INTAKE_CONSOLE_HTML = """
     const approve = async (dryRun, override) => {
       const data = await reviewPost({ path: "/api/review/approve-candidate-groups", payload: { source_job_id: Number(val("source_job_id")) || null, dry_run: dryRun, allow_review_readiness: override || null, actor: val("verified_by") || "console" } });
       show(data, "none");
+      if (!dryRun) renderApprovalSummary(data);
       if (!dryRun && Number(data.groups_approved || 0) > 0) mark("approved", "done");
     };
+    let pendingApply = null;
+    const openApplyConfirm = (action, override) => {
+      pendingApply = { action, override };
+      setVal("confirmText", "");
+      document.getElementById("confirmAction").textContent = action;
+      document.getElementById("confirmSourceJobId").textContent = val("source_job_id") || "(all)";
+      document.getElementById("confirmModal").hidden = false;
+    };
+    const closeApplyConfirm = () => {
+      pendingApply = null;
+      document.getElementById("confirmModal").hidden = true;
+    };
+    document.getElementById("confirmCancel").onclick = closeApplyConfirm;
+    document.getElementById("confirmApply").onclick = async () => {
+      if (!pendingApply) return;
+      if (val("confirmText") !== "APPROVE") return show({ error: "approval_confirmation_required" }, "none");
+      try {
+        const apply = pendingApply;
+        closeApplyConfirm();
+        await approve(false, apply.override);
+      } catch (e) { mark("approved", "failed"); show({ error: e.message }); }
+    };
+    document.getElementById("viewRegistry").onclick = async () => {
+      try {
+        const rows = await getJson("/api/registry/approved-addresses", {
+          limit: 500,
+          entity_name: val("registry_entity_name"),
+          chain_slug: val("registry_chain_slug"),
+          address_class: val("registry_address_class"),
+          role: val("registry_role")
+        });
+        renderControlSections([{ title: "Approved Registry", rows, columns: registryColumns }]);
+        show(rows, "none");
+      } catch (e) { show({ error: e.message }, "none"); }
+    };
+    document.getElementById("viewSourceVerifications").onclick = async () => {
+      try {
+        const rows = await getJson("/api/review/source-verifications", {
+          source_job_id: val("verification_filter_source_job_id"),
+          entity_name: val("verification_filter_entity_name"),
+          source_trust: val("verification_filter_source_trust"),
+          verification_status: val("verification_filter_status"),
+          limit: 500
+        });
+        renderControlSections([{ title: "Source Verifications", rows, columns: verificationColumns }]);
+        show(rows, "none");
+      } catch (e) { show({ error: e.message }, "none"); }
+    };
+    document.getElementById("viewApprovalEvents").onclick = async () => {
+      try {
+        const rows = await getJson("/api/review/approval-events", {
+          source_job_id: val("event_filter_source_job_id"),
+          candidate_group_key: val("event_filter_candidate_group_key"),
+          action: val("event_filter_action"),
+          actor: val("event_filter_actor"),
+          limit: val("event_filter_limit") || 100
+        });
+        renderControlSections([{ title: "Approval Events", rows, columns: eventColumns }]);
+        show(rows, "none");
+      } catch (e) { show({ error: e.message }, "none"); }
+    };
+    document.getElementById("globalSearch").onclick = async () => {
+      try {
+        const data = await getJson("/api/review/global-search", { q: val("global_search_query"), limit: 100 });
+        renderControlSections([
+          { title: "Matched Approved Addresses", rows: data.approved_addresses || [], columns: registryColumns },
+          { title: "Matched Candidates", rows: data.candidates || [], columns: searchCandidateColumns },
+          { title: "Matched Evidence", rows: data.evidence || [], columns: searchEvidenceColumns }
+        ]);
+        show(data, "none");
+      } catch (e) { show({ error: e.message }, "none"); }
+    };
     document.getElementById("approveReadyDry").onclick = async () => { try { await approve(true, null); } catch (e) { show({ error: e.message }); } };
-    document.getElementById("approveReadyApply").onclick = async () => { try { await approve(false, null); } catch (e) { mark("approved", "failed"); show({ error: e.message }); } };
+    document.getElementById("approveReadyApply").onclick = () => openApplyConfirm("Approve Ready Groups Apply", null);
     document.getElementById("approveLowDry").onclick = async () => { try { await approve(true, "needs_review_official_low_confidence"); } catch (e) { show({ error: e.message }); } };
-    document.getElementById("approveLowApply").onclick = async () => { try { await approve(false, "needs_review_official_low_confidence"); } catch (e) { mark("approved", "failed"); show({ error: e.message }); } };
+    document.getElementById("approveLowApply").onclick = () => openApplyConfirm("Approve Low Confidence Override Apply", "needs_review_official_low_confidence");
     document.getElementById("approveHotColdDry").onclick = async () => { try { await approve(true, "needs_review_hot_cold_wallet"); } catch (e) { show({ error: e.message }); } };
-    document.getElementById("approveHotColdApply").onclick = async () => { try { await approve(false, "needs_review_hot_cold_wallet"); } catch (e) { mark("approved", "failed"); show({ error: e.message }); } };
+    document.getElementById("approveHotColdApply").onclick = () => openApplyConfirm("Approve Hot/Cold Override Apply", "needs_review_hot_cold_wallet");
     renderWorkflow();
     renderSourceEvidence();
   </script>

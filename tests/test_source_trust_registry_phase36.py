@@ -329,6 +329,30 @@ def test_review_and_registry_api_endpoints(client: TestClient) -> None:
     assert rows[0]["role"] == "cex_por_wallet"
     assert rows[0]["evidence_count"] == 1
 
+    verifications = client.get(
+        "/api/review/source-verifications",
+        params={"source_job_id": source_job_id, "entity_name": "Bybit", "source_trust": "third_party_audit"},
+    )
+    assert verifications.status_code == 200, verifications.text
+    verification_rows = verifications.json()
+    assert len(verification_rows) == 1
+    assert verification_rows[0]["entity_name"] == "Bybit"
+    assert verification_rows[0]["verified_by"] == "pytest"
+
+    events = client.get("/api/review/approval-events", params={"source_job_id": source_job_id, "actor": "api-test"})
+    assert events.status_code == 200, events.text
+    event_rows = events.json()
+    assert len(event_rows) == 1
+    assert event_rows[0]["action"] == "approved"
+    assert event_rows[0]["payload_json"]["evidence_linked"] == 1
+
+    search = client.get("/api/review/global-search", params={"q": "Bybit"})
+    assert search.status_code == 200, search.text
+    body = search.json()
+    assert len(body["approved_addresses"]) == 1
+    assert len(body["candidates"]) == 1
+    assert len(body["evidence"]) == 1
+
 
 def test_export_approved_registry_works(tmp_path) -> None:
     output = tmp_path / "approved_registry.csv"

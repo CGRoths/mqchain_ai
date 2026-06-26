@@ -4,8 +4,19 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func, or_, select
 
 from app.api.deps import DBSession
+from app.models.intake import (
+    AddressCandidate,
+    AddressEvidence,
+    ApprovalEvent,
+    ApprovedAddress,
+    ApprovedAddressEvidence,
+    ApprovedAddressRole,
+    Entity,
+    SourceVerification,
+)
 from app.review.approval_registry import approve_candidate_groups, get_unique_candidate_groups
 from app.review.candidate_audit import audit_candidates
 from app.review.official_auto_approval import auto_approve_official_candidates
@@ -163,4 +174,197 @@ def create_source_verification(payload: SourceVerificationRequest, db: DBSession
         "verification_evidence_json": verification.verification_evidence_json,
         "created_at": verification.created_at.isoformat() if verification.created_at else None,
         "updated_at": verification.updated_at.isoformat() if verification.updated_at else None,
+    }
+
+
+@api_router.get("/source-verifications")
+def source_verifications(
+    db: DBSession,
+    source_job_id: int | None = None,
+    entity_name: str | None = None,
+    source_trust: str | None = None,
+    verification_status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    stmt = select(SourceVerification).order_by(SourceVerification.created_at.desc(), SourceVerification.id.desc())
+    if source_job_id is not None:
+        stmt = stmt.where(SourceVerification.source_job_id == source_job_id)
+    if entity_name:
+        stmt = stmt.where(SourceVerification.entity_name.ilike(f"%{entity_name}%"))
+    if source_trust:
+        stmt = stmt.where(SourceVerification.source_trust == source_trust)
+    if verification_status:
+        stmt = stmt.where(SourceVerification.verification_status == verification_status)
+    return [_source_verification_row(item) for item in db.scalars(stmt.limit(min(limit, 500)).offset(offset))]
+
+
+@api_router.get("/approval-events")
+def approval_events(
+    db: DBSession,
+    source_job_id: int | None = None,
+    candidate_group_key: str | None = None,
+    action: str | None = None,
+    actor: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    stmt = select(ApprovalEvent).order_by(ApprovalEvent.created_at.desc(), ApprovalEvent.id.desc())
+    if source_job_id is not None:
+        stmt = (
+            stmt.outerjoin(ApprovedAddressEvidence, ApprovalEvent.approved_address_id == ApprovedAddressEvidence.approved_address_id)
+            .where(ApprovedAddressEvidence.source_job_id == source_job_id)
+            .distinct()
+        )
+    if candidate_group_key:
+        stmt = stmt.where(ApprovalEvent.candidate_group_key == candidate_group_key)
+    if action:
+        stmt = stmt.where(ApprovalEvent.action == action)
+    if actor:
+        stmt = stmt.where(ApprovalEvent.actor.ilike(f"%{actor}%"))
+    return [_approval_event_row(item) for item in db.scalars(stmt.limit(min(limit, 500)).offset(offset))]
+
+
+@api_router.get("/global-search")
+def global_search(db: DBSession, q: str, limit: int = 50) -> dict[str, list[dict[str, Any]]]:
+    query = q.strip()
+    if not query:
+        return {"approved_addresses": [], "candidates": [], "evidence": []}
+    limit = min(limit, 200)
+    pattern = f"%{query}%"
+
+    approved = _search_approved_addresses(db, pattern=pattern, limit=limit)
+    candidates_stmt = (
+        select(AddressCandidate)
+        .where(
+            or_(
+                AddressCandidate.entity_name.ilike(pattern),
+                AddressCandidate.source_network.ilike(pattern),
+                AddressCandidate.chain_slug.ilike(pattern),
+                AddressCandidate.address.ilike(pattern),
+                AddressCandidate.normalized_address.ilike(pattern),
+                AddressCandidate.suggested_role.ilike(pattern),
+            )
+        )
+        .order_by(AddressCandidate.updated_at.desc(), AddressCandidate.id.desc())
+        .limit(limit)
+    )
+    candidates = [_candidate_row(item) for item in db.scalars(candidates_stmt)]
+
+    evidence_stmt = (
+        select(AddressEvidence, AddressCandidate)
+        .join(AddressCandidate, AddressCandidate.id == AddressEvidence.candidate_id)
+        .where(
+            or_(
+                AddressEvidence.evidence_type.ilike(pattern),
+                AddressEvidence.source_type.ilike(pattern),
+                AddressEvidence.source_url.ilike(pattern),
+                AddressEvidence.file_path.ilike(pattern),
+                AddressCandidate.entity_name.ilike(pattern),
+                AddressCandidate.chain_slug.ilike(pattern),
+                AddressCandidate.address.ilike(pattern),
+                AddressCandidate.normalized_address.ilike(pattern),
+            )
+        )
+        .order_by(AddressEvidence.id.desc())
+        .limit(limit)
+    )
+    evidence = [_evidence_search_row(item, candidate) for item, candidate in db.execute(evidence_stmt)]
+    return {"approved_addresses": approved, "candidates": candidates, "evidence": evidence}
+
+
+def _source_verification_row(verification: SourceVerification) -> dict[str, Any]:
+    return {
+        **(source_verification_payload(verification) or {}),
+        "entity_name": verification.entity_name,
+        "source_origin": verification.source_origin,
+        "source_url": verification.source_url,
+        "evidence_shape": verification.evidence_shape,
+        "verification_reason": verification.verification_reason,
+        "created_at": verification.created_at.isoformat() if verification.created_at else None,
+        "updated_at": verification.updated_at.isoformat() if verification.updated_at else None,
+    }
+
+
+def _approval_event_row(event: ApprovalEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "approved_address_id": event.approved_address_id,
+        "candidate_group_key": event.candidate_group_key,
+        "action": event.action,
+        "actor": event.actor,
+        "reason": event.reason,
+        "dry_run": event.dry_run,
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+        "payload_json": event.payload_json or {},
+    }
+
+
+def _search_approved_addresses(db: DBSession, *, pattern: str, limit: int) -> list[dict[str, Any]]:
+    evidence_count = func.count(ApprovedAddressEvidence.id).label("evidence_count")
+    stmt = (
+        select(Entity, ApprovedAddress, ApprovedAddressRole, evidence_count)
+        .join(ApprovedAddress, ApprovedAddress.entity_id == Entity.id)
+        .join(ApprovedAddressRole, ApprovedAddressRole.approved_address_id == ApprovedAddress.id)
+        .outerjoin(ApprovedAddressEvidence, ApprovedAddressEvidence.approved_address_id == ApprovedAddress.id)
+        .where(
+            or_(
+                Entity.entity_name.ilike(pattern),
+                ApprovedAddress.chain_slug.ilike(pattern),
+                ApprovedAddress.address.ilike(pattern),
+                ApprovedAddress.normalized_address.ilike(pattern),
+                ApprovedAddress.address_class.ilike(pattern),
+                ApprovedAddressRole.role.ilike(pattern),
+            )
+        )
+        .group_by(Entity.id, ApprovedAddress.id, ApprovedAddressRole.id)
+        .order_by(Entity.entity_name.asc(), ApprovedAddress.chain_slug.asc(), ApprovedAddress.normalized_address.asc())
+        .limit(limit)
+    )
+    return [_approved_address_row(entity, approved, role, count) for entity, approved, role, count in db.execute(stmt)]
+
+
+def _approved_address_row(entity: Entity, approved: ApprovedAddress, role: ApprovedAddressRole, evidence_count: int) -> dict[str, Any]:
+    return {
+        "entity_name": entity.entity_name,
+        "chain_slug": approved.chain_slug,
+        "address": approved.address,
+        "normalized_address": approved.normalized_address,
+        "address_class": approved.address_class,
+        "role": role.role,
+        "source_trust_status": approved.source_trust_status,
+        "confidence_score": approved.confidence_score,
+        "evidence_count": int(evidence_count or 0),
+        "first_approved_at": approved.first_approved_at.isoformat() if approved.first_approved_at else None,
+    }
+
+
+def _candidate_row(candidate: AddressCandidate) -> dict[str, Any]:
+    return {
+        "id": candidate.id,
+        "source_job_id": candidate.source_job_id,
+        "entity_name": candidate.entity_name,
+        "chain_slug": candidate.chain_slug,
+        "address": candidate.address,
+        "normalized_address": candidate.normalized_address,
+        "suggested_role": candidate.suggested_role,
+        "status": candidate.status,
+        "confidence_initial": candidate.confidence_initial,
+        "evidence_type": candidate.evidence_type,
+    }
+
+
+def _evidence_search_row(evidence: AddressEvidence, candidate: AddressCandidate) -> dict[str, Any]:
+    return {
+        "id": evidence.id,
+        "candidate_id": evidence.candidate_id,
+        "source_job_id": candidate.source_job_id,
+        "entity_name": candidate.entity_name,
+        "chain_slug": candidate.chain_slug,
+        "address": candidate.address,
+        "evidence_type": evidence.evidence_type,
+        "source_type": evidence.source_type,
+        "source_url": evidence.source_url,
+        "file_path": evidence.file_path,
+        "payload_preview": evidence.payload or {},
     }

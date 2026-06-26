@@ -1348,6 +1348,13 @@ def test_intake_console_and_input_window_behavior(client: TestClient) -> None:
     assert "Source Verification" in html
     assert "/api/review/source-verifications" in html
     assert "/api/review/candidate-groups" in html
+    assert "View Approved Registry" in html
+    assert "View Source Verifications" in html
+    assert "View Approval Events" in html
+    assert "Search address / entity / chain" in html
+    assert "metadata_warnings" in html
+    assert "approval_confirmation_required" in html
+    assert "APPROVE" in html
     assert "candidateTableWrap" in html
     assert "Evidence table" in html
     assert "evidenceTableWrap" in html
