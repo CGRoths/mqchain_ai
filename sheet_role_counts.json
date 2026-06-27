@@ -1,0 +1,98 @@
+[
+  {
+    "source_sheet": "Binance_HotCold",
+    "entity_name": "Binance",
+    "suggested_role": "cex_por_wallet",
+    "n": 421
+  },
+  {
+    "source_sheet": "BitMEX",
+    "entity_name": "BitMEX",
+    "suggested_role": "cex_por_wallet",
+    "n": 41
+  },
+  {
+    "source_sheet": "Bitfinex",
+    "entity_name": "Bitfinex",
+    "suggested_role": "cex_cold_wallet",
+    "n": 14
+  },
+  {
+    "source_sheet": "Bitfinex",
+    "entity_name": "Bitfinex",
+    "suggested_role": "cex_hot_wallet",
+    "n": 23
+  },
+  {
+    "source_sheet": "Bitfinex",
+    "entity_name": "Bitfinex",
+    "suggested_role": "wallet",
+    "n": 1
+  },
+  {
+    "source_sheet": "Bybit",
+    "entity_name": "Bybit",
+    "suggested_role": "cex_por_wallet",
+    "n": 417
+  },
+  {
+    "source_sheet": "CoinEx_CET_Staking",
+    "entity_name": "CoinEx",
+    "suggested_role": "staking_delegator",
+    "n": 353
+  },
+  {
+    "source_sheet": "CoinEx_Wallets",
+    "entity_name": "CoinEx",
+    "suggested_role": "cex_por_wallet",
+    "n": 87
+  },
+  {
+    "source_sheet": "Deribit",
+    "entity_name": "Deribit",
+    "suggested_role": "cex_por_wallet",
+    "n": 42
+  },
+  {
+    "source_sheet": "Firi",
+    "entity_name": "Firi",
+    "suggested_role": "wallet",
+    "n": 15
+  },
+  {
+    "source_sheet": "Huobi_HTX",
+    "entity_name": "Huobi / HTX",
+    "suggested_role": "cex_por_wallet",
+    "n": 42
+  },
+  {
+    "source_sheet": "Indodax_CMC",
+    "entity_name": "Indodax",
+    "suggested_role": "cex_por_wallet",
+    "n": 25
+  },
+  {
+    "source_sheet": "Indodax_CMC_Assets",
+    "entity_name": "Indodax",
+    "suggested_role": "cex_por_wallet",
+    "n": 60
+  },
+  {
+    "source_sheet": "KuCoin",
+    "entity_name": "KuCoin",
+    "suggested_role": "cex_por_wallet",
+    "n": 305
+  },
+  {
+    "source_sheet": "MEXC",
+    "entity_name": "MEXC",
+    "suggested_role": "cex_por_wallet",
+    "n": 59
+  },
+  {
+    "source_sheet": "OKX_Staking_Wallets",
+    "entity_name": "OKX",
+    "suggested_role": "cex_hot_wallet",
+    "n": 12
+  }
+]
