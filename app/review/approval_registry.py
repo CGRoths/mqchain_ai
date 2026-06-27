@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.ingestion.network_normalizer import NetworkNormalizer
 from app.review.candidate_audit import (
+    CORE_PROTOCOL_ROLES,
     classify_approval_readiness,
     classify_candidate_address_class,
     classify_source_trust_status,
@@ -33,6 +34,7 @@ DEFAULT_APPROVABLE_READINESS = {
     "auto_ready_official_verified",
     "ready_for_approval_cex_reserve",
     "ready_for_approval_core_protocol",
+    "ready_for_approval_official_registry_entry",
 }
 LOW_CONFIDENCE_OVERRIDE_READINESS = "needs_review_official_low_confidence"
 LOW_CONFIDENCE_OVERRIDE_REASON = "manual_policy_override: official low-confidence reserve/core candidate"
@@ -283,11 +285,13 @@ APPROVAL_READINESS_RANK = {
     "needs_review_manual_verified": 2,
     "needs_review_unmapped_official_role": 3,
     "needs_review_official_likely": 3,
+    "needs_review_official_registry_entry": 3,
     "needs_review_hot_cold_wallet": 4,
     "needs_review_staking_mapping": 5,
     "needs_review_official_low_confidence": 6,
     "ready_for_approval_core_protocol": 7,
     "ready_for_approval_cex_reserve": 7,
+    "ready_for_approval_official_registry_entry": 7,
     "auto_ready_official_verified": 8,
 }
 
@@ -437,6 +441,9 @@ def _get_or_create_approved_address(db: Session, entity: Entity, group: Candidat
         metadata_json={
             "candidate_group_key": group.group_key,
             "candidate_count": len(group.candidates),
+            "source_role_label": group.suggested_role,
+            "source_role_labels": _source_role_labels(group),
+            **_relationship_metadata(group),
             "source_verifications": [
                 source_verification_payload(verification_gate_for_candidate(db, candidate).verification)
                 for candidate in group.candidates
@@ -482,6 +489,35 @@ def _get_or_create_role(db: Session, approved_address: ApprovedAddress, group: C
     db.add(created)
     db.flush()
     return created, True
+
+
+def _source_role_labels(group: CandidateGroup) -> list[str]:
+    labels = {
+        str(candidate.suggested_role).strip()
+        for candidate in group.candidates
+        if candidate.suggested_role and str(candidate.suggested_role).strip()
+    }
+    if group.suggested_role and str(group.suggested_role).strip():
+        labels.add(str(group.suggested_role).strip())
+    return sorted(labels)
+
+
+def _relationship_metadata(group: CandidateGroup) -> dict[str, str | None]:
+    role = (group.suggested_role or "").strip().lower()
+    if group.address_class == "core_protocol_contract" and role in CORE_PROTOCOL_ROLES:
+        return {
+            "relationship_type": "owned_by_entity",
+            "ownership_scope": "owned_by_entity",
+        }
+    if group.address_class == "official_registry_entry":
+        return {
+            "relationship_type": "officially_referenced_by_entity",
+            "ownership_scope": "unknown_ownership",
+        }
+    return {
+        "relationship_type": None,
+        "ownership_scope": "unknown_ownership",
+    }
 
 
 def _link_evidence(db: Session, approved_address: ApprovedAddress, group: CandidateGroup) -> int:

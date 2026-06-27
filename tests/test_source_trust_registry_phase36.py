@@ -159,6 +159,64 @@ def test_live_evidence_overrides_stale_embedded_missing_evidence_readiness() -> 
         assert "readiness_invalid_missing_evidence" not in result["skipped_reasons"]
 
 
+def test_official_structured_registry_role_is_approvable_without_core_role_mapping() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        candidate = _candidate(
+            db,
+            job,
+            entity_name="Grove",
+            evidence_type="github_deployment_source",
+            source_input_type="github_json_deployment_registry",
+            suggested_role="alm_controller",
+            confidence_initial=85,
+            raw_reference={"contract_name": "alm_controller", "original_role_text": "alm_controller"},
+        )
+        _verify_candidate(db, candidate, source_trust="official_verified")
+
+        report = audit_candidates(db, source_job_id=job.id)
+        groups = get_unique_candidate_groups(db, source_job_id=job.id)
+        result = approve_candidate_groups(db, source_job_id=job.id, dry_run=True)
+
+        assert len(candidate.evidence) == 1
+        assert classify_candidate_address_class(candidate) == "official_registry_entry"
+        assert groups[0].approval_readiness == "ready_for_approval_official_registry_entry"
+        assert groups[0].approval_readiness != "needs_review_unmapped_official_role"
+        assert report["count_by_review_bucket"]["ready_for_approval_official_registry_entry"] == 1
+        assert result["groups_approved"] == 1
+
+
+def test_official_registry_external_role_preserves_label_without_owned_relationship() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        candidate = _candidate(
+            db,
+            job,
+            entity_name="Grove",
+            evidence_type="github_deployment_source",
+            source_input_type="github_json_deployment_registry",
+            suggested_role="usdc",
+            confidence_initial=85,
+            address="0x2222222222222222222222222222222222222222",
+            normalized_address="0x2222222222222222222222222222222222222222",
+            raw_reference={"contract_name": "USDC", "original_role_text": "usdc"},
+        )
+        _verify_candidate(db, candidate, source_trust="official_verified")
+
+        result = approve_candidate_groups(db, source_job_id=job.id, dry_run=False, actor="pytest")
+        approved = db.scalar(select(ApprovedAddress))
+        role = db.scalar(select(ApprovedAddressRole))
+
+        assert result["groups_approved"] == 1
+        assert approved.address_class == "official_registry_entry"
+        assert role.role == "usdc"
+        assert approved.metadata_json["source_role_label"] == "usdc"
+        assert approved.metadata_json["source_role_labels"] == ["usdc"]
+        assert approved.metadata_json["relationship_type"] == "officially_referenced_by_entity"
+        assert approved.metadata_json["ownership_scope"] == "unknown_ownership"
+        assert approved.metadata_json["relationship_type"] != "owned_by_entity"
+
+
 def test_apply_approval_creates_registry_rows_and_is_idempotent() -> None:
     with SessionLocal() as db:
         job = _source_job(db)

@@ -25,6 +25,21 @@ CORE_PROTOCOL_ROLES = {
     "treasury",
 }
 
+OFFICIAL_REGISTRY_ENTRY_SOURCE_INPUT_TYPES = {
+    "github_solidity_address_book",
+    "github_typescript_address_map",
+    "github_json_deployment_registry",
+    "github_yaml_deployment_registry",
+    "github_markdown_deployment_table",
+    "official_github_deployment_table",
+    "docs_html_deployment_table",
+    "docs_markdown_deployment_table",
+    "json_deployment_registry",
+    "yaml_deployment_registry",
+    "structured_deployment_registry",
+    "standardized_registry_upload",
+}
+
 
 def audit_candidates(db: Session, source_job_id: int | None = None, limit_samples: int = 20) -> dict:
     stmt = select(AddressCandidate).options(selectinload(AddressCandidate.evidence)).order_by(AddressCandidate.id.asc())
@@ -168,6 +183,8 @@ def classify_candidate_address_class(candidate, evidence_payload: dict | None = 
         return "explorer_link_only"
     if role in CORE_PROTOCOL_ROLES:
         return "core_protocol_contract"
+    if _is_official_registry_entry_source(candidate):
+        return "official_registry_entry"
     if "wallet" in role:
         return "generic_wallet"
     return "unknown_candidate"
@@ -253,6 +270,8 @@ def classify_approval_readiness(candidate, source_trust_status: str, address_cla
     if address_class == "explorer_link_only":
         return "not_auto_approvable_explorer_link_only"
     ready_trust = _is_ready_trust_for_address_class(source_trust_status, address_class)
+    if address_class == "official_registry_entry":
+        return "ready_for_approval_official_registry_entry" if ready_trust else "needs_review_official_registry_entry"
     if address_class == "unknown_candidate":
         return "needs_review_unmapped_official_role" if ready_trust else "not_auto_approvable_unknown"
     if address_class in {"staking_deposit_wallet", "staking_withdrawal_wallet"}:
@@ -290,7 +309,14 @@ def _is_ready_trust_for_address_class(source_trust_status: str, address_class: s
         return source_trust_status in {"official_confirmed", "official_reference", "exchange_reported", "third_party_audit"}
     if address_class == "core_protocol_contract":
         return source_trust_status == "official_confirmed"
+    if address_class == "official_registry_entry":
+        return source_trust_status == "official_confirmed"
     return _is_trusted_official_status(source_trust_status)
+
+
+def _is_official_registry_entry_source(candidate: AddressCandidate) -> bool:
+    source_input_type = (candidate.source_input_type or "").strip().lower()
+    return source_input_type in OFFICIAL_REGISTRY_ENTRY_SOURCE_INPUT_TYPES
 
 
 def _candidate_evidence_text(candidate, evidence_payload: dict | None = None) -> str:

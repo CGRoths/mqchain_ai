@@ -38,6 +38,20 @@ CORE_PROTOCOL_ROLES = {
     "router_contract",
     "treasury",
 }
+OFFICIAL_REGISTRY_ENTRY_SOURCE_INPUT_TYPES = {
+    "github_solidity_address_book",
+    "github_typescript_address_map",
+    "github_json_deployment_registry",
+    "github_yaml_deployment_registry",
+    "github_markdown_deployment_table",
+    "official_github_deployment_table",
+    "docs_html_deployment_table",
+    "docs_markdown_deployment_table",
+    "json_deployment_registry",
+    "yaml_deployment_registry",
+    "structured_deployment_registry",
+    "standardized_registry_upload",
+}
 ROLE_TRUST_POLICY = {
     "cex_reserve_wallet": {
         "official_verified",
@@ -47,6 +61,7 @@ ROLE_TRUST_POLICY = {
         "manual_verified",
     },
     "core_protocol_contract": {"official_verified", "official_likely", "manual_verified"},
+    "official_registry_entry": {"official_verified", "official_likely", "manual_verified"},
 }
 
 
@@ -202,9 +217,16 @@ def address_class_for_candidate(candidate: AddressCandidate) -> str:
         return "cex_cold_wallet"
     if role in CORE_PROTOCOL_ROLES:
         return "core_protocol_contract"
+    if _is_official_registry_entry_source(candidate):
+        return "official_registry_entry"
     if "wallet" in role:
         return "generic_wallet"
     return "unknown_candidate"
+
+
+def _is_official_registry_entry_source(candidate: AddressCandidate) -> bool:
+    source_input_type = (candidate.source_input_type or "").strip().lower()
+    return source_input_type in OFFICIAL_REGISTRY_ENTRY_SOURCE_INPUT_TYPES
 
 
 def build_candidate_group_key(candidate: AddressCandidate) -> str:
