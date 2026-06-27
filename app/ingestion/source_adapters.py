@@ -1807,10 +1807,26 @@ def _candidate_from_address(
     clean = clean_wallet_address(address)
     if not clean:
         return None
-    network = NetworkNormalizer.normalize(raw_network)
+
+    inferred_family = _infer_address_family(clean)
+    effective_network = raw_network
+
+    if not effective_network and inferred_family == "evm" and source_input_type in {
+        "github_solidity_address_book",
+        "github_json_deployment_registry",
+        "github_markdown_deployment_table",
+        "official_github_deployment_table",
+    }:
+        effective_network = _default_evm_network_for_source(
+            source_url=source_url,
+            file_path=artifact.local_file_path,
+            filename=artifact.filename,
+        )
+
+    network = NetworkNormalizer.normalize(effective_network)
     if not _valid_address_for_network(clean, network):
         return None
-    inferred_family = _infer_address_family(clean)
+
     chain_guess = network.chain_guess or inferred_family
     chain_slug = network.canonical_chain
     chain_id = network.chain_id
@@ -1864,7 +1880,7 @@ def _candidate_from_address(
         source_trust=source_trust,
     )
     entity = raw_reference.get("row_entity") or raw_reference.get("sheet_entity_hint") or _entity_from_sheet_name(source_sheet) or source_identity.entity_name
-    if not raw_network and source_input_type in {
+    if not effective_network  and source_input_type in {
         "docs_html_deployment_table",
         "docs_markdown_deployment_table",
         "github_solidity_address_book",
@@ -1876,7 +1892,7 @@ def _candidate_from_address(
         address=clean,
         normalized_address=normalized,
         entity_name=entity,
-        source_network=raw_network,
+        source_network=effective_network,
         chain_guess=chain_guess,
         chain_slug=chain_slug,
         chain_id=chain_id,
@@ -1912,6 +1928,36 @@ def _candidate_from_address(
         },
     )
 
+def _default_evm_network_for_source(
+    *,
+    source_url: str | None,
+    file_path: str | None,
+    filename: str | None,
+) -> str | None:
+    haystack = " ".join(
+        value
+        for value in [source_url, file_path, filename]
+        if value
+    ).lower()
+
+    if "arbitrum" in haystack:
+        return "arbitrum"
+    if "base" in haystack:
+        return "base"
+    if "optimism" in haystack:
+        return "optimism"
+    if "polygon" in haystack or "matic" in haystack:
+        return "polygon"
+    if "bsc" in haystack or "bnb" in haystack:
+        return "bsc"
+    if "avalanche" in haystack or "avax" in haystack:
+        return "avalanche-c"
+    if "ethereum" in haystack or "mainnet" in haystack or "eth" in haystack:
+        return "ethereum"
+
+    # Temporary fallback for Solidity GitHub address books:
+    # EVM address + no explicit network = Ethereum mainnet unless source path says otherwise.
+    return "ethereum"
 
 def _safe_candidate_evidence_type(
     *,

@@ -16,6 +16,7 @@ class NetworkNormalizer:
     NETWORKS: dict[str, tuple[str, int | None, str]] = {
         "ethereum": ("ethereum", 1, "evm"),
         "eth": ("ethereum", 1, "evm"),
+        "evm": ("ethereum", 1, "evm"),
         "eth staking": ("ethereum", 1, "evm"),
         "ethereum eth staking": ("ethereum", 1, "evm"),
         "ethereum evm": ("ethereum", 1, "evm"),
