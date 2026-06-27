@@ -129,6 +129,36 @@ def test_dry_run_approval_does_not_mutate_db() -> None:
         assert db.scalar(select(func.count(ApprovalEvent.id))) == 0
 
 
+def test_live_evidence_overrides_stale_embedded_missing_evidence_readiness() -> None:
+    with SessionLocal() as db:
+        job = _source_job(db)
+        candidate = _candidate(
+            db,
+            job,
+            evidence_type="pdf_por_document",
+            confidence_initial=85,
+            raw_reference={
+                "approval_readiness": "invalid_missing_evidence",
+                "discovery_permission": {"approval_readiness": "invalid_missing_evidence"},
+            },
+        )
+        _verify_candidate(db, candidate, source_trust="third_party_audit")
+
+        readiness = classify_approval_readiness(
+            candidate,
+            "third_party_audit",
+            classify_candidate_address_class(candidate),
+            candidate.confidence_initial,
+            len(candidate.evidence),
+        )
+        result = approve_candidate_groups(db, source_job_id=job.id, dry_run=True)
+
+        assert len(candidate.evidence) == 1
+        assert readiness == "ready_for_approval_cex_reserve"
+        assert result["groups_approved"] == 1
+        assert "readiness_invalid_missing_evidence" not in result["skipped_reasons"]
+
+
 def test_apply_approval_creates_registry_rows_and_is_idempotent() -> None:
     with SessionLocal() as db:
         job = _source_job(db)

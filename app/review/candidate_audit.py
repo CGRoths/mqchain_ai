@@ -228,17 +228,6 @@ def _explicit_source_trust_level(candidate, evidence_payload: dict | None = None
     return None
 
 
-def _explicit_approval_readiness(candidate) -> str | None:
-    raw = candidate.raw_reference or {}
-    readiness = raw.get("approval_readiness")
-    if readiness:
-        return str(readiness)
-    discovery = raw.get("discovery_permission")
-    if isinstance(discovery, dict) and discovery.get("approval_readiness"):
-        return str(discovery["approval_readiness"])
-    return None
-
-
 def _nested_get(source: dict, key: str):
     if key in source:
         return source.get(key)
@@ -249,9 +238,6 @@ def _nested_get(source: dict, key: str):
 
 
 def classify_approval_readiness(candidate, source_trust_status: str, address_class: str, confidence_initial: int | None, evidence_count: int) -> str:
-    explicit_readiness = _explicit_approval_readiness(candidate)
-    if explicit_readiness:
-        return explicit_readiness
     if not candidate.entity_name:
         return "invalid_missing_entity"
     if not candidate.source_network:
@@ -262,6 +248,8 @@ def classify_approval_readiness(candidate, source_trust_status: str, address_cla
         return "invalid_missing_address"
     if evidence_count <= 0:
         return "invalid_missing_evidence"
+    # Preview-time embedded readiness can be stale. Final audit/approval readiness is
+    # always derived from current DB-backed candidate fields and evidence links.
     if address_class == "explorer_link_only":
         return "not_auto_approvable_explorer_link_only"
     ready_trust = _is_ready_trust_for_address_class(source_trust_status, address_class)
