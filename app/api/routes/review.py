@@ -21,7 +21,7 @@ from app.models.intake import (
 from app.review.approval_registry import approve_candidate_groups, get_unique_candidate_groups
 from app.review.candidate_audit import audit_candidates
 from app.review.official_auto_approval import auto_approve_official_candidates
-from app.review.source_verification import record_source_verification, source_verification_payload
+from app.review.source_verification import record_source_verification, source_verification_payload, verify_source_sheets_from_candidates
 from app.review.snapshot_diff import create_source_snapshot, diff_source_snapshot, mark_missing_in_latest
 
 
@@ -83,6 +83,13 @@ class SourceVerificationRequest(BaseModel):
     verified_by: str | None = None
     verification_reason: str | None = None
     verification_evidence_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class VerifySourceSheetsRequest(BaseModel):
+    source_job_id: int
+    verified_by: str
+    dry_run: bool = True
+    update_existing: bool = False
 
 
 class SourceSnapshotRequest(BaseModel):
@@ -204,6 +211,20 @@ def create_source_verification(payload: SourceVerificationRequest, db: DBSession
         "created_at": verification.created_at.isoformat() if verification.created_at else None,
         "updated_at": verification.updated_at.isoformat() if verification.updated_at else None,
     }
+
+
+@api_router.post("/verify-source-sheets-from-manifest")
+def verify_source_sheets_from_manifest(payload: VerifySourceSheetsRequest, db: DBSession) -> dict[str, Any]:
+    try:
+        return verify_source_sheets_from_candidates(
+            db,
+            source_job_id=payload.source_job_id,
+            verified_by=payload.verified_by,
+            dry_run=payload.dry_run,
+            update_existing=payload.update_existing,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"fatal_errors": [str(exc)]}) from exc
 
 
 @api_router.post("/source-snapshots")
